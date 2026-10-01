@@ -1,0 +1,16 @@
+{
+  "name": "ihsan",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A daily operating system for Muslims: prayer-anchored days, deep focus, dhikr, and a nightly review.",
+  "type": "module",
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "build": "node scripts/build.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
