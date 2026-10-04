@@ -58,6 +58,9 @@
     ],
     "setupFiles": [
       "./jest.setup.js"
+    ],
+    "modulePathIgnorePatterns": [
+      "<rootDir>/extension"
     ]
   }
 }

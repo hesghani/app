@@ -99,3 +99,7 @@ __tests__/               Jest tests
 - Tests check sunrise, solar noon and sunset against an independent NOAA model. They agree within 2 minutes across 7 cities and 5 seasons.
 - At high latitudes the app uses the angle-based rule. Umm al-Qura switches Isha to 120 minutes after Maghrib in Ramadan.
 - Quran and hadith are given as plain English meanings with references. Other quotes were chosen for verifiable attribution.
+
+## Also in this repo
+
+[`extension/`](extension/README.md) holds **Loupe**, a separate Chrome extension for Amazon Merch on Demand sellers (BSR research, sales analytics, trademark checks and listing tools). It has its own `package.json` and doesn't affect the app.

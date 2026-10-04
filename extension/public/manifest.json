@@ -1,0 +1,74 @@
+{
+  "manifest_version": 3,
+  "name": "Loupe for Merch on Demand",
+  "short_name": "Loupe",
+  "version": "0.0.0",
+  "description": "BSR and sales estimates on Amazon, niche research, trademark checks, sales analytics and listing tools for Merch on Demand.",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "Loupe for Merch on Demand",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "options_ui": {
+    "page": "dashboard.html#settings",
+    "open_in_tab": true
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": ["storage", "unlimitedStorage", "alarms", "notifications", "contextMenus", "offscreen"],
+  "host_permissions": [
+    "https://www.amazon.com/*",
+    "https://www.amazon.co.uk/*",
+    "https://www.amazon.de/*",
+    "https://www.amazon.fr/*",
+    "https://www.amazon.it/*",
+    "https://www.amazon.es/*",
+    "https://www.amazon.co.jp/*",
+    "https://merch.amazon.com/*",
+    "https://completion.amazon.com/*",
+    "https://completion.amazon.co.uk/*",
+    "https://completion.amazon.de/*",
+    "https://completion.amazon.fr/*",
+    "https://completion.amazon.it/*",
+    "https://completion.amazon.es/*",
+    "https://completion.amazon.co.jp/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.amazon.com/*",
+        "https://www.amazon.co.uk/*",
+        "https://www.amazon.de/*",
+        "https://www.amazon.fr/*",
+        "https://www.amazon.it/*",
+        "https://www.amazon.es/*",
+        "https://www.amazon.co.jp/*"
+      ],
+      "js": ["content-amazon.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://merch.amazon.com/*"],
+      "js": ["content-merch-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://merch.amazon.com/*"],
+      "js": ["content-merch.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
