@@ -2,7 +2,8 @@
 // the user's machine; nothing is sent to any server.
 
 import { withDefaults, type Settings } from './settings';
-import type { CaptureLogEntry, ListingDraft, NicheResult, ProductData, ReplayTemplate, SaleRow, StoredProduct } from './types';
+import type { Template } from './learn';
+import type { AccountFacts, CaptureLogEntry, ListingDraft, NicheResult, ProductData, SaleRow, StoredProduct, SyncState } from './types';
 import type { MarketplaceId } from './marketplaces';
 
 export interface Meta {
@@ -11,15 +12,24 @@ export interface Meta {
   lastWatchRefresh?: number;
   installedAt?: number;
   demo?: boolean;
+  /** How far back daily sales have been synced, and when the catalog was last read. */
+  coverage?: { salesFrom?: string; salesTo?: string; catalogAt?: number };
+  migratedToDb?: boolean;
+  /** Marketplaces Loupe has sales for; a marketplace's first import never notifies. */
+  knownMarkets?: string[];
 }
 
 interface Schema {
   settings: Partial<Settings>;
+  /** Legacy: sales lived here before moving to IndexedDB; migrated on startup. */
   sales: Record<string, SaleRow>;
   drafts: ListingDraft[];
   niches: NicheResult[];
   captureLog: CaptureLogEntry[];
-  replay: ReplayTemplate[];
+  templates: Template[];
+  syncState: SyncState;
+  account: AccountFacts | null;
+  agentDismissed: string[];
   meta: Meta;
 }
 
@@ -31,7 +41,10 @@ const EMPTY: { [K in Key]: Schema[K] } = {
   drafts: [],
   niches: [],
   captureLog: [],
-  replay: [],
+  templates: [],
+  syncState: { status: 'idle', mode: 'quick', phase: '' },
+  account: null,
+  agentDismissed: [],
   meta: {},
 };
 

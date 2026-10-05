@@ -1,57 +1,49 @@
 import { useMemo, useState } from 'preact/hooks';
-import { dailySeries, filterRows, productSummaries, type ProductSummary } from '../../shared/analytics';
-import { addDays, localDay, RANGE_LABELS, resolveRange, type RangeKey } from '../../shared/dates';
-import * as fmt from '../../shared/format';
+import type { Design } from '../../shared/agent';
+import { addDays, pacificDay } from '../../shared/dates';
+import { dailySeries, filterRows } from '../../shared/analytics';
 import { toCsv } from '../../shared/csv';
-import { MARKETPLACES, productUrl, type MarketplaceId } from '../../shared/marketplaces';
-import { PRODUCT_TYPES, type ProductType } from '../../shared/products';
+import * as fmt from '../../shared/format';
+import { MARKETPLACES, productUrl } from '../../shared/marketplaces';
+import { PRODUCT_TYPES } from '../../shared/products';
 import { ColumnChart } from '../../ui/charts';
 import { Card, Empty, Notice, Seg } from '../../ui/components';
 import { Arrow, Box, Download, External, Search } from '../../ui/icons';
 import type { Data } from '../data';
-import { MarketplaceSelect, PageHead, ProductTypeSelect, usePersistent } from './common';
+import { usePortfolio } from './agent';
+import { PageHead } from './common';
 import { download } from './download';
 
-type SortKey = 'units' | 'royalty' | 'velocity' | 'lastSale' | 'daysSinceSale';
+type SortKey = 'u30' | 'u90' | 'u365' | 'r90' | 'lastSale' | 'ageDays';
+type Show = 'live' | 'sold' | 'never' | 'all';
 
 export function Products({ data }: { data: Data }) {
-  const { settings, sales } = data;
-  const [rangeKey, setRangeKey] = usePersistent<RangeKey>('products-range', '90d');
-  const [mp, setMp] = usePersistent<MarketplaceId | 'ALL'>('products-mp', 'ALL');
-  const [type, setType] = usePersistent<ProductType | 'ALL'>('products-type', 'ALL');
+  const p = usePortfolio(data);
+  const currency = data.settings.displayCurrency;
   const [query, setQuery] = useState('');
-  const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: 'units', desc: true });
-  const [atRisk, setAtRisk] = useState(false);
+  const [show, setShow] = useState<Show>('live');
+  const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: 'u90', desc: true });
   const [open, setOpen] = useState<string | null>(null);
-  const today = localDay();
-  const currency = settings.displayCurrency;
-  const limitDays = Math.round(settings.inactivityMonths * 30.4);
-  const warnDays = limitDays - 60;
-
-  const scope = useMemo(
-    () => filterRows(sales, { range: { from: '0000-01-01', to: '9999-12-31' }, marketplaces: mp === 'ALL' ? undefined : [mp], productTypes: type === 'ALL' ? undefined : [type] }),
-    [sales, mp, type],
-  );
-  const range = resolveRange(rangeKey, today, scope.reduce((m, r) => (r.date < m ? r.date : m), today));
-  const summaries = useMemo(() => productSummaries(scope, range, today, currency, settings.fx), [scope, range.from, range.to, currency, settings.fx]);
-  const risky = summaries.filter((s) => (s.daysSinceSale ?? 0) >= warnDays);
+  const [limit, setLimit] = useState(300);
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    let list = summaries.filter((s) => !q || s.title.toLowerCase().includes(q) || s.asin.toLowerCase().includes(q));
-    if (atRisk) list = list.filter((s) => (s.daysSinceSale ?? 0) >= warnDays);
-    const value = (s: ProductSummary) => {
-      const v = s[sort.key];
+    let list = p.designs.filter((d) => !q || d.title.toLowerCase().includes(q) || d.products.some((x) => x.asin?.toLowerCase().includes(q)));
+    if (show === 'live') list = list.filter((d) => d.live);
+    if (show === 'sold') list = list.filter((d) => d.u365 > 0);
+    if (show === 'never') list = list.filter((d) => d.live && d.u365 === 0);
+    const value = (d: Design) => {
+      const v = d[sort.key];
       return typeof v === 'string' ? Date.parse(v) : (v ?? -1);
     };
     return [...list].sort((a, b) => (sort.desc ? value(b) - value(a) : value(a) - value(b)));
-  }, [summaries, query, sort, atRisk, warnDays]);
+  }, [p, query, show, sort]);
 
-  if (!sales.length) {
+  if (!p.designs.length) {
     return (
       <div class="stack">
-        <PageHead title="Products" />
-        <Card><Empty icon={<Box size={22} />} title="No products yet"><p>Products appear here once Loupe has recorded sales.</p></Empty></Card>
+        <PageHead title="Designs" />
+        <Card><Empty icon={<Box size={22} />} title="No designs yet"><p>Connect your Merch account and your designs appear here, including the ones that never sold.</p></Empty></Card>
       </div>
     );
   }
@@ -67,38 +59,29 @@ export function Products({ data }: { data: Data }) {
 
   return (
     <div class="stack">
-      <PageHead title="Products" sub={`${summaries.length} designs with recorded sales`}>
+      <PageHead title="Designs" sub={`${fmt.int(p.liveDesigns)} live designs${p.catalogKnown ? ` · ${fmt.int(p.liveProducts)} live products` : ''} · grouped across product types and marketplaces`}>
         <button
           class="btn sm"
           onClick={() =>
-            download(
-              'loupe-products.csv',
-              toCsv([
-                ['ASIN', 'Marketplace', 'Title', 'Product type', `Units (${RANGE_LABELS[rangeKey]})`, `Royalties ${currency}`, 'Cancelled', 'Returned', 'First sale', 'Last sale', 'Days since sale', 'Units per day (30d)'],
-                ...rows.map((s) => [s.asin, s.marketplace, s.title, s.productType ? PRODUCT_TYPES[s.productType].label : '', s.units, s.royalty.toFixed(2), s.cancelled, s.returned, s.firstSale ?? '', s.lastSale ?? '', s.daysSinceSale ?? '', s.velocity.toFixed(2)]),
-              ]),
-            )
+            download('loupe-designs.csv', toCsv([
+              ['Design', 'Brand', 'Live', 'Product types', 'Marketplaces', 'Units 30d', 'Units 90d', 'Units 365d', `Royalties 90d ${currency}`, `Royalties 365d ${currency}`, 'Returns 365d', 'Last sale', 'Created', 'ASINs'],
+              ...rows.map((d) => [d.title, d.brand, d.live ? 'yes' : 'no', d.types.map((t) => PRODUCT_TYPES[t].short).join(' '), d.marketplaces.join(' '), d.u30, d.u90, d.u365, d.r90.toFixed(2), d.r365.toFixed(2), d.returns365, d.lastSale ?? '', d.createdAt ?? '', d.products.map((x) => x.asin).filter(Boolean).join(' ')]),
+            ]))
           }
         >
           <Download size={14} /> Export CSV
         </button>
       </PageHead>
 
-      {risky.length > 0 && (
-        <Notice kind="warn">
-          <b>{risky.length} designs</b> haven't sold in over {fmt.int(warnDays)} days. Merch removes listings without a sale for {settings.inactivityMonths} months.{' '}
-          <button class="btn sm" style={{ marginLeft: '6px' }} onClick={() => setAtRisk(!atRisk)}>{atRisk ? 'Show all' : 'Show them'}</button>
-        </Notice>
-      )}
+      {!p.catalogKnown && <Notice kind="warn">Only designs with sales are listed until Loupe reads your product list on Merch. Use Sync now on the Agent page.</Notice>}
 
       <div class="filters">
-        <Seg<RangeKey> label="Date range" value={rangeKey} onChange={setRangeKey} options={(['30d', '90d', 'year', 'all'] as RangeKey[]).map((r) => [r, RANGE_LABELS[r]])} />
-        <MarketplaceSelect value={mp} onChange={setMp} all />
-        <ProductTypeSelect value={type} onChange={setType} all />
-        <div class="row" style={{ position: 'relative' }}>
+        <Seg<Show> label="Show" value={show} onChange={setShow} options={[['live', 'Live'], ['sold', 'Sold this year'], ['never', 'No sales this year'], ['all', 'All']]} />
+        <div class="row">
           <Search size={14} class="muted" />
-          <input class="input" style={{ width: '220px' }} placeholder="Search title or ASIN" value={query} onInput={(e) => setQuery((e.target as HTMLInputElement).value)} aria-label="Search products" />
+          <input class="input" style={{ width: '240px' }} placeholder="Search title or ASIN" value={query} onInput={(e) => setQuery((e.target as HTMLInputElement).value)} aria-label="Search designs" />
         </div>
+        <span class="muted small">{fmt.int(rows.length)} designs</span>
       </div>
 
       <Card pad={false}>
@@ -107,40 +90,38 @@ export function Products({ data }: { data: Data }) {
             <thead>
               <tr>
                 <th>Design</th>
-                <th>Type</th>
-                {header('units', 'Units')}
-                {header('royalty', 'Royalties')}
-                {header('velocity', 'Per day (30d)')}
+                <th>Products</th>
+                {header('u30', '30d')}
+                {header('u90', '90d')}
+                {header('u365', '365d')}
+                {header('r90', 'Royalties 90d')}
                 {header('lastSale', 'Last sale')}
-                {header('daysSinceSale', 'Days idle')}
+                {header('ageDays', 'Age')}
               </tr>
             </thead>
             <tbody>
-              {rows.slice(0, 500).map((s) => {
-                const idle = s.daysSinceSale ?? 0;
+              {rows.slice(0, limit).map((d) => {
+                const first = d.products.find((x) => x.asin && x.marketplace);
                 return (
                   <>
-                    <tr class={open === s.key ? 'expanded' : ''} onClick={() => setOpen(open === s.key ? null : s.key)} style={{ cursor: 'pointer' }}>
+                    <tr class={open === d.key ? 'expanded' : ''} onClick={() => setOpen(open === d.key ? null : d.key)} style={{ cursor: 'pointer' }}>
                       <td>
                         <div class="title-cell">
-                          <span title={MARKETPLACES[s.marketplace].name}>{MARKETPLACES[s.marketplace].flag}</span>
-                          <span class="t" title={s.title}>{s.title || s.asin}</span>
+                          <span class="t" title={d.title}>{d.title || first?.asin}</span>
+                          {!d.live && <span class="pill neutral">not live</span>}
                         </div>
                       </td>
-                      <td class="ink2 nowrap">{s.productType ? PRODUCT_TYPES[s.productType].short : '–'}</td>
-                      <td class="num">{fmt.int(s.units)}</td>
-                      <td class="num">{fmt.money(s.royalty, currency)}</td>
-                      <td class="num">{s.velocity ? s.velocity.toFixed(2) : '–'}</td>
-                      <td class="num muted">{fmt.day(s.lastSale)}</td>
-                      <td class="num">
-                        {idle >= warnDays ? <span class="pill warn">{idle}d</span> : <span class="muted">{s.daysSinceSale ?? '–'}</span>}
-                      </td>
+                      <td class="small ink2 nowrap">{d.types.map((t) => PRODUCT_TYPES[t].short).join(', ') || '–'} {d.marketplaces.map((m) => MARKETPLACES[m].flag).join('')}</td>
+                      <td class="num">{fmt.int(d.u30)}</td>
+                      <td class="num">{fmt.int(d.u90)}</td>
+                      <td class="num">{d.u365 ? fmt.int(d.u365) : <span class="pill warn">0</span>}</td>
+                      <td class="num">{fmt.money(d.r90, currency)}</td>
+                      <td class="num muted">{fmt.day(d.lastSale)}</td>
+                      <td class="num muted">{fmt.age(d.ageDays)}</td>
                     </tr>
-                    {open === s.key && (
+                    {open === d.key && (
                       <tr class="expanded">
-                        <td colSpan={7}>
-                          <ProductDetail summary={s} data={data} />
-                        </td>
+                        <td colSpan={8}><DesignDetail design={d} data={data} /></td>
                       </tr>
                     )}
                   </>
@@ -149,28 +130,36 @@ export function Products({ data }: { data: Data }) {
             </tbody>
           </table>
         </div>
-        {rows.length > 500 && <div class="card-foot muted small">Showing the first 500 of {rows.length}. Narrow the filters or export CSV.</div>}
+        {rows.length > limit && (
+          <div class="card-foot row">
+            <span class="muted small grow">Showing {fmt.int(limit)} of {fmt.int(rows.length)}.</span>
+            <button class="btn sm" onClick={() => setLimit(limit + 300)}>Show more</button>
+          </div>
+        )}
       </Card>
-      <p class="muted small">Only designs with at least one recorded sale appear here. Royalties are converted to {currency}.</p>
     </div>
   );
 }
 
-function ProductDetail({ summary, data }: { summary: ProductSummary; data: Data }) {
-  const today = localDay();
+function DesignDetail({ design, data }: { design: Design; data: Data }) {
+  const today = pacificDay(Date.now());
   const range = { from: addDays(today, -89), to: today };
-  const rows = filterRows(data.sales, { range, marketplaces: [summary.marketplace], asin: summary.asin });
+  const keys = new Set(design.products.map((p) => p.key));
+  const rows = filterRows(data.sales, { range }).filter((r) => keys.has(`${r.marketplace}:${r.asin}`));
   const series = dailySeries(rows, range, data.settings.displayCurrency, data.settings.fx);
   return (
     <div class="stack" style={{ padding: '6px 0' }}>
-      <div class="row wrap">
-        <span class="muted small">{summary.asin} · first sale {fmt.day(summary.firstSale, 'long')} · {fmt.int(summary.cancelled)} cancelled · {fmt.int(summary.returned)} returned</span>
-        <span class="grow" />
-        <a class="btn sm" href={productUrl(summary.marketplace, summary.asin)} target="_blank" rel="noopener"><External size={13} /> Amazon</a>
+      <div class="chips">
+        {design.products.map((p) => (
+          <span class="chip" title={p.status}>
+            {p.marketplace ? MARKETPLACES[p.marketplace].flag : ''} {p.productType ? PRODUCT_TYPES[p.productType].short : 'Product'} · {fmt.int(p.u90)} in 90d
+            {p.asin && p.marketplace && <a href={productUrl(p.marketplace, p.asin)} target="_blank" rel="noopener" onClick={(e) => e.stopPropagation()}><External size={11} /></a>}
+          </span>
+        ))}
       </div>
       <ColumnChart
         height={150}
-        ariaLabel={`Daily units for ${summary.title || summary.asin}, last 90 days`}
+        ariaLabel={`Daily units for ${design.title}, last 90 days`}
         data={series.map((d) => ({ key: d.date, label: fmt.day(d.date), value: d.units, detail: `${fmt.day(d.date)} · ${fmt.money(d.royalty, data.settings.displayCurrency)}` }))}
         format={(n) => fmt.compact(n)}
       />

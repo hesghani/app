@@ -27,7 +27,14 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "permissions": ["storage", "unlimitedStorage", "alarms", "notifications", "contextMenus", "offscreen"],
+  "permissions": [
+    "alarms",
+    "contextMenus",
+    "notifications",
+    "offscreen",
+    "storage",
+    "unlimitedStorage"
+  ],
   "host_permissions": [
     "https://www.amazon.com/*",
     "https://www.amazon.co.uk/*",
@@ -56,19 +63,31 @@
         "https://www.amazon.es/*",
         "https://www.amazon.co.jp/*"
       ],
-      "js": ["content-amazon.js"],
+      "js": [
+        "content-amazon.js"
+      ],
       "run_at": "document_idle"
     },
     {
-      "matches": ["https://merch.amazon.com/*"],
-      "js": ["content-merch-main.js"],
+      "matches": [
+        "https://merch.amazon.com/*"
+      ],
+      "js": [
+        "content-merch-main.js"
+      ],
       "run_at": "document_start",
-      "world": "MAIN"
+      "world": "MAIN",
+      "all_frames": true
     },
     {
-      "matches": ["https://merch.amazon.com/*"],
-      "js": ["content-merch.js"],
-      "run_at": "document_idle"
+      "matches": [
+        "https://merch.amazon.com/*"
+      ],
+      "js": [
+        "content-merch.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ]
 }

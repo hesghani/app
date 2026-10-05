@@ -5,7 +5,7 @@ import { addDays } from './dates';
 import { MARKETPLACES, type MarketplaceId } from './marketplaces';
 import { defaultPrice, type ProductType } from './products';
 import { DEFAULT_ROYALTY_MODEL, estimateRoyalty } from './royalty';
-import type { SaleRow } from './types';
+import type { CatalogItem, SaleRow } from './types';
 
 function rng(seed: number) {
   let s = seed >>> 0;
@@ -112,4 +112,36 @@ export function demoSales(today: string, days = 400): SaleRow[] {
     }
   }
   return rows;
+}
+
+const DEAD = [
+  'Bigfoot Believer Club', 'Llama Drama Queen', 'Sloth Running Team', 'Gnome Sweet Gnome', 'Taco Bout It', 'Sushi Roll Life',
+  'Retro Roller Skate Queen', 'Yeti Hide And Seek Champion', 'Unicorn Squad Leader', 'Avocado Workout Club', 'Narwhal Ocean Dreamer',
+  'Bowling Pin Pun', 'Disc Golf Dad', 'Kayak Life Lake Days', 'Beekeeper Honey Boss', 'Frog Prince Vintage', 'Corgi Butt Lover',
+  'Pineapple Party Time', 'Moose Lodge Camping', 'Platypus Patrol', 'Cactus Hug Me', 'Bigfoot Fishing Trip', 'Llama Christmas Lights',
+  'Sloth Yoga Pose', 'Dinosaur Coffee Monster', 'Alpaca Spit Happens', 'Owl Night Shift', 'Penguin Ice Skater', 'Raccoon Trash Panda Club',
+  'Chicken Whisperer Farm', 'Goat Yoga Instructor', 'Koala Nap Time', 'Hedgehog Hugs', 'Squirrel Nut Job', 'Panda Bamboo Snack',
+];
+
+/** A sample catalog matching demoSales: every design that sold, plus designs that never did. */
+export function demoCatalog(today: string): CatalogItem[] {
+  const random = rng(7);
+  const sold = new Map<string, CatalogItem>();
+  for (const r of demoSales(today, 400)) {
+    const key = `${r.marketplace}:${r.asin}`;
+    if (sold.has(key)) continue;
+    sold.set(key, {
+      key, asin: r.asin, id: null, designId: null, title: r.title, brand: 'Sample Studio', productType: r.productType, marketplace: r.marketplace,
+      status: 'live', rawStatus: 'LIVE', price: defaultPrice(r.productType ?? 'STANDARD_TSHIRT', r.marketplace), createdAt: addDays(today, -420), image: null, seenAt: 0,
+    });
+  }
+  const dead: CatalogItem[] = DEAD.map((title, i) => {
+    const asin = asinFor(1000 + i);
+    return {
+      key: `US:${asin}`, asin, id: null, designId: null, title: `${title} T-Shirt`, brand: 'Sample Studio', productType: 'STANDARD_TSHIRT', marketplace: 'US',
+      status: i % 11 === 10 ? 'rejected' : 'live', rawStatus: i % 11 === 10 ? 'REJECTED' : 'LIVE', price: 19.99,
+      createdAt: addDays(today, -(180 + Math.floor(random() * 500))), image: null, seenAt: 0,
+    };
+  });
+  return [...sold.values(), ...dead];
 }

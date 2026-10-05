@@ -2,14 +2,15 @@ import { render } from 'preact';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { filterRows, totals } from '../shared/analytics';
 import { addDays, pacificDay, resolveRange } from '../shared/dates';
+import { salesBetween } from '../shared/db';
 import * as fmt from '../shared/format';
 import type { Message } from '../shared/messages';
 import { merchSearchUrl, type MarketplaceId } from '../shared/marketplaces';
 import type { Settings } from '../shared/settings';
 import { get, getSettings, onStorageChange, type Meta } from '../shared/storage';
 import { scanText, usptoUrl } from '../shared/trademark';
-import type { SaleRow } from '../shared/types';
-import { Alert, Bulb, Chart, Eye, Logo, Pen, Refresh, Search, Settings as SettingsIcon, Shield } from '../ui/icons';
+import type { SaleRow, SyncState } from '../shared/types';
+import { Alert, Bulb, Chart, Eye, Logo, Refresh, Search, Settings as SettingsIcon, Shield, Wand } from '../ui/icons';
 import { MarketplaceSelect } from '../dashboard/views/common';
 
 function open(hash: string) {
@@ -24,18 +25,20 @@ function Popup() {
   const [keyword, setKeyword] = useState('');
   const [mp, setMp] = useState<MarketplaceId>('US');
   const [tm, setTm] = useState('');
-  const [syncing, setSyncing] = useState(false);
+  const [syncState, setSyncState] = useState<SyncState | null>(null);
 
   useEffect(() => {
     const load = async () => {
-      const [s, rows, m] = await Promise.all([getSettings(), get('sales'), get('meta')]);
+      const today = pacificDay(Date.now());
+      const [s, rows, m, sync] = await Promise.all([getSettings(), salesBetween(addDays(today, -40), today), get('meta'), get('syncState')]);
       setSettings(s);
-      setSales(Object.values(rows));
+      setSales(rows);
       setMeta(m);
+      setSyncState(sync);
       setMp((current) => (current === 'US' ? s.marketplace : current));
     };
     void load();
-    return onStorageChange(['sales', 'meta', 'settings'], () => void load());
+    return onStorageChange(['dataVersion', 'meta', 'settings', 'syncState'], () => void load());
   }, []);
 
   const stats = useMemo(() => {
@@ -79,16 +82,13 @@ function Popup() {
             </div>
           </div>
           <div class="card-foot row">
-            <span class="muted small grow">Sales days follow Amazon's Pacific time.</span>
+            <span class="muted small grow">
+              {syncState?.status === 'running' ? syncState.phase : syncState?.status === 'signin' ? 'Sign in to Merch to keep syncing' : `Synced ${fmt.ago(meta.lastCaptureAt)}`}
+            </span>
             <button
               class="btn sm"
-              disabled={syncing}
-              onClick={async () => {
-                setSyncing(true);
-                const res = (await chrome.runtime.sendMessage({ type: 'merch:refresh-all' } satisfies Message)) as { tabs?: number };
-                setSyncing(false);
-                if (!res?.tabs) void chrome.tabs.create({ url: 'https://merch.amazon.com/' });
-              }}
+              disabled={syncState?.status === 'running'}
+              onClick={() => void chrome.runtime.sendMessage({ type: 'sync:start', mode: meta.demo || !meta.lastCaptureAt ? 'connect' : 'quick', interactive: true } satisfies Message)}
             >
               <Refresh size={13} /> Sync
             </button>
@@ -96,9 +96,11 @@ function Popup() {
         </div>
       ) : (
         <div class="card" style={{ padding: '12px' }}>
-          <p class="small"><b>No sales yet.</b> Open your Merch on Demand sales report and Loupe records it automatically.</p>
+          <p class="small"><b>{syncState?.status === 'running' ? 'Syncing your Merch account…' : 'Not connected yet.'}</b> {syncState?.status === 'running' ? syncState.phase : 'Loupe uses the Merch session you are signed in with to download your sales and products.'}</p>
           <div class="row" style={{ marginTop: '8px' }}>
-            <a class="btn sm primary" href="https://merch.amazon.com/" target="_blank" rel="noopener">Open Merch</a>
+            <button class="btn sm primary" disabled={syncState?.status === 'running'} onClick={() => void chrome.runtime.sendMessage({ type: 'sync:start', mode: 'connect', interactive: true } satisfies Message)}>
+              <Refresh size={13} /> Connect Merch account
+            </button>
             <button class="btn sm" onClick={() => open('welcome')}>Get started</button>
           </div>
         </div>
@@ -146,10 +148,11 @@ function Popup() {
       </div>
 
       <div class="navgrid">
-        <button onClick={() => open('overview')}><Chart size={17} />Dashboard</button>
+        <button onClick={() => open('agent')}><Wand size={17} />Agent</button>
+        <button onClick={() => open('overview')}><Chart size={17} />Sales</button>
         <button onClick={() => open('research')}><Search size={17} />Research</button>
         <button onClick={() => open('watchlist')}><Eye size={17} />Watchlist</button>
-        <button onClick={() => open('listings')}><Pen size={17} />Listings</button>
+
       </div>
     </div>
   );

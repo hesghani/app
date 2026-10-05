@@ -20,12 +20,12 @@ type Obj = { [key: string]: Json };
 const KEYS = {
   asin: ['asin', 'childasin', 'productasin', 'itemasin'],
   date: ['date', 'day', 'purchasedate', 'orderdate', 'saledate', 'salesdate', 'transactiondate', 'reportdate', 'perioddate', 'datetime', 'purchasedatetime', 'timestamp', 'periodstart', 'time'],
-  units: ['units', 'unitssold', 'unitspurchased', 'purchasedunits', 'netunits', 'soldunits', 'purchased', 'quantity', 'qty', 'sold', 'unitcount', 'orders', 'sales'],
+  units: ['units', 'unitssold', 'unitspurchased', 'purchasedunits', 'netunits', 'netunitssold', 'soldunits', 'purchased', 'quantity', 'quantitysold', 'qty', 'qtysold', 'sold', 'netsold', 'unitcount', 'orders', 'sales', 'salescount'],
   cancelled: ['cancelled', 'canceled', 'unitscancelled', 'unitscanceled', 'cancellations', 'cancelledunits', 'canceledunits'],
   returned: ['returned', 'returns', 'unitsreturned', 'returnedunits'],
-  royalty: ['royalty', 'royalties', 'royaltyamount', 'totalroyalty', 'totalroyalties', 'royaltyvalue', 'netroyalty', 'netroyalties', 'earnings'],
+  royalty: ['royalty', 'royalties', 'royaltyamount', 'royaltyamt', 'totalroyalty', 'totalroyalties', 'totalroyaltyamount', 'royaltyvalue', 'netroyalty', 'netroyalties', 'royaltyearned', 'royaltiesearned', 'estimatedroyalty', 'estimatedroyalties', 'earnings'],
   currency: ['currency', 'currencycode', 'royaltycurrency', 'royaltycurrencycode'],
-  marketplace: ['marketplace', 'marketplaceid', 'marketplacename', 'marketplacecode', 'market', 'countrycode', 'country', 'site', 'domain', 'storefront'],
+  marketplace: ['marketplace', 'marketplaceid', 'marketplacename', 'marketplacecode', 'market', 'countrycode', 'country', 'site', 'domain', 'storefront', 'saleschannel', 'channel'],
   productType: ['producttype', 'garmenttype', 'shirttype', 'productcategory', 'producttypename', 'type'],
   title: ['title', 'producttitle', 'designtitle', 'listingtitle', 'itemname', 'name', 'productname'],
 } as const;
@@ -106,6 +106,8 @@ export function toDay(v: Json | undefined): string | null {
 
 export interface Context {
   date?: string;
+  /** Where `date` came from: the payload itself, or the request URL. */
+  dateSource?: 'payload' | 'url';
   marketplace?: MarketplaceId;
   currency?: Currency;
 }
@@ -138,8 +140,10 @@ function rowFrom(source: Obj, ctx: Context): SaleRow | null {
   const units = toCount(unitsRaw);
   if (units === null && royaltyRaw.value === null) return null;
 
-  const date = toDay(pick(obj, 'date')) ?? ctx.date;
+  const ownDate = toDay(pick(obj, 'date'));
+  const date = ownDate ?? ctx.date;
   if (!date) return null;
+  if (!ownDate && ctx.dateSource === 'url') urlDated.add(source);
 
   const currencyRaw = pick(obj, 'currency');
   const currency =
@@ -165,10 +169,16 @@ function rowFrom(source: Obj, ctx: Context): SaleRow | null {
   };
 }
 
+// Rows whose date came only from the request URL (set during a walk).
+let urlDated = new WeakSet<object>();
+
 function extendContext(obj: Obj, ctx: Context): Context {
   const next = { ...ctx };
   const date = toDay(pick(obj, 'date'));
-  if (date) next.date = date;
+  if (date) {
+    next.date = date;
+    next.dateSource = 'payload';
+  }
   const mp = marketplaceFromAny(pick(obj, 'marketplace'));
   if (mp) next.marketplace = mp;
   const cur = pick(obj, 'currency');
@@ -198,7 +208,10 @@ export function contextFromUrl(url: string): Context {
       if (mp) ctx.marketplace = mp;
     }
   }
-  if (days.size === 1) ctx.date = Array.from(days)[0];
+  if (days.size === 1) {
+    ctx.date = Array.from(days)[0];
+    ctx.dateSource = 'url';
+  }
   return ctx;
 }
 
@@ -224,9 +237,34 @@ export function aggregate(rows: SaleRow[]): SaleRow[] {
   return Array.from(map.values());
 }
 
-export function normalizePayload(payload: unknown, url = ''): SaleRow[] {
+const ASIN = /^[A-Z0-9]{10}$/;
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}/;
+
+/** {columns: ["asin", "units"…], rows: [["B0…", 3…]]} → array of objects. */
+function zipColumnar(obj: Obj): Obj[] | null {
+  const entries = Object.values(obj);
+  const header = entries.find(
+    (v): v is Json[] => Array.isArray(v) && v.length > 1 && v.every((h) => typeof h === 'string' || (isObj(h) && typeof (h.name ?? h.key ?? h.id) === 'string')),
+  );
+  if (!header) return null;
+  const names = header.map((h) => (typeof h === 'string' ? h : String((h as Obj).name ?? (h as Obj).key ?? (h as Obj).id)));
+  if (!names.some((n) => norm(n) === 'asin')) return null;
+  const body = entries.find((v): v is Json[] => Array.isArray(v) && v !== header && v.length > 0 && v.every((r) => Array.isArray(r) && r.length === names.length));
+  if (!body) return null;
+  return body.map((r) => Object.fromEntries(names.map((n, i) => [n, (r as Json[])[i] ?? null])));
+}
+
+export interface NormalizeResult {
+  rows: SaleRow[];
+  /** True when every row's date came from the payload rather than the request URL. */
+  dated: boolean;
+}
+
+export function normalizeSales(payload: unknown, url = '', base: Context = {}): NormalizeResult {
   const rows: SaleRow[] = [];
   const seen = new WeakSet<object>();
+  urlDated = new WeakSet<object>();
+  let undatedRows = 0;
   const walk = (node: Json, ctx: Context, depth: number) => {
     if (depth > 12 || node === null || typeof node !== 'object' || seen.has(node)) return;
     seen.add(node);
@@ -236,16 +274,32 @@ export function normalizePayload(payload: unknown, url = ''): SaleRow[] {
     }
     const row = rowFrom(node, ctx);
     if (row) {
+      if (urlDated.has(node)) undatedRows += 1;
       rows.push(row);
       return;
     }
+    const zipped = zipColumnar(node);
     const next = extendContext(node, ctx);
-    for (const value of Object.values(node)) {
-      if (value && typeof value === 'object') walk(value, next, depth + 1);
+    if (zipped) {
+      for (const item of zipped) walk(item, next, depth + 1);
+      return;
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (!value || typeof value !== 'object') continue;
+      // Maps keyed by ASIN ({"B0…": {units: 3}}) or by day ({"2026-10-04": [...]}).
+      if (ASIN.test(key) && isObj(value) && pick(value, 'asin') === undefined) {
+        walk({ asin: key, ...value }, next, depth + 1);
+      } else if (ISO_DAY.test(key)) {
+        walk(value, { ...next, date: key.slice(0, 10), dateSource: 'payload' }, depth + 1);
+      } else walk(value, next, depth + 1);
     }
   };
-  walk(payload as Json, contextFromUrl(url), 0);
-  return aggregate(rows);
+  walk(payload as Json, { ...base, ...contextFromUrl(url) }, 0);
+  return { rows: aggregate(rows), dated: rows.length > 0 && undatedRows === 0 };
+}
+
+export function normalizePayload(payload: unknown, url = ''): SaleRow[] {
+  return normalizeSales(payload, url).rows;
 }
 
 /** Top-level keys of a payload, for the capture log in Settings → Diagnostics. */
@@ -277,9 +331,9 @@ export function mergeSales(
   incoming: SaleRow[],
   today: string,
   recentDays: string[] = [today],
+  firstImport = Object.keys(store).length === 0,
 ): MergeResult {
   const next = { ...store };
-  const firstImport = Object.keys(store).length === 0;
   let added = 0;
   let updated = 0;
   const newSales: NewSale[] = [];

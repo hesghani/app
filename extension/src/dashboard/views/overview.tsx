@@ -8,7 +8,8 @@ import { MARKETPLACES, productUrl, type MarketplaceId } from '../../shared/marke
 import { PRODUCT_TYPES, type ProductType } from '../../shared/products';
 import { BarList, ColumnChart, DataTable } from '../../ui/charts';
 import { Card, Notice, Seg, StatTile } from '../../ui/components';
-import { External, Refresh } from '../../ui/icons';
+import { External } from '../../ui/icons';
+import { ConnectCard, startSync } from './connect';
 import { navigate, type Data } from '../data';
 import { MarketplaceSelect, PageHead, ProductTypeSelect, usePersistent } from './common';
 import { Welcome } from './welcome';
@@ -56,6 +57,7 @@ export function Overview({ data }: { data: Data }) {
     return (
       <div class="stack">
         <PageHead title="Overview" sub="Your Merch on Demand sales at a glance" />
+        {data.syncState.status !== 'idle' && <ConnectCard data={data} />}
         <Welcome settings={settings} compact />
       </div>
     );
@@ -72,19 +74,14 @@ export function Overview({ data }: { data: Data }) {
 
   return (
     <div class="stack">
-      <PageHead title="Overview" sub={`${RANGE_LABELS[rangeKey]} · ${fmt.day(view.range.from, 'long')} – ${fmt.day(view.range.to, 'long')}`}>
-        <button class="btn sm" onClick={async () => {
-          const res = (await chrome.runtime.sendMessage({ type: 'merch:refresh-all' })) as { tabs?: number };
-          if (!res?.tabs) window.open('https://merch.amazon.com/', '_blank');
-        }}>
-          <Refresh size={14} /> Sync now
-        </button>
-      </PageHead>
+      <PageHead title="Overview" sub={`${RANGE_LABELS[rangeKey]} · ${fmt.day(view.range.from, 'long')} – ${fmt.day(view.range.to, 'long')}`} />
 
-      {meta.demo && (
+      {meta.demo ? (
         <Notice>
-          You're looking at <b>sample data</b>. Open Merch on Demand's sales report and your real sales replace it automatically.
+          You're looking at <b>sample data</b>. <button class="btn sm" onClick={() => void startSync('connect')}>Connect your Merch account</button> and your real sales replace it.
         </Notice>
+      ) : (
+        <ConnectCard data={data} compact />
       )}
 
       <div class="filters">

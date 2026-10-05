@@ -1,54 +1,91 @@
-// Loads everything the dashboard shows from chrome.storage and keeps it live.
+// Loads everything the dashboard shows and keeps it live: settings and small
+// state from chrome.storage, sales/catalog/totals from IndexedDB.
 
 import { useEffect, useState } from 'preact/hooks';
+import { getAll } from '../shared/db';
+import type { Template } from '../shared/learn';
 import { withDefaults, type Settings } from '../shared/settings';
-import { onStorageChange, type Meta } from '../shared/storage';
-import type { CaptureLogEntry, ListingDraft, NicheResult, ReplayTemplate, SaleRow, StoredProduct } from '../shared/types';
+import type { Meta } from '../shared/storage';
+import type { AccountFacts, CaptureLogEntry, CatalogItem, ListingDraft, NicheResult, RangeTotal, SaleRow, StoredProduct, SyncState } from '../shared/types';
 
 export interface Data {
   ready: boolean;
   settings: Settings;
   sales: SaleRow[];
+  catalog: CatalogItem[];
+  totals: RangeTotal[];
   meta: Meta;
   products: StoredProduct[];
   drafts: ListingDraft[];
   niches: NicheResult[];
   captureLog: CaptureLogEntry[];
-  replay: ReplayTemplate[];
+  templates: Template[];
+  syncState: SyncState;
+  account: AccountFacts | null;
+  agentDismissed: string[];
+  /** Bumps whenever sales, catalog or totals change, for memoization. */
+  dbVersion: number;
 }
 
-async function load(): Promise<Omit<Data, 'ready'>> {
-  // One read for everything; products are stored one key each ("p:US:B0…").
+type StoragePart = Omit<Data, 'ready' | 'sales' | 'catalog' | 'totals' | 'dbVersion'>;
+type DbPart = Pick<Data, 'sales' | 'catalog' | 'totals'>;
+
+async function loadStorage(): Promise<StoragePart> {
   const all = await chrome.storage.local.get(null);
   const pick = <T>(key: string, fallback: T): T => (all[key] as T | undefined) ?? fallback;
   return {
     settings: withDefaults(pick<Partial<Settings>>('settings', {})),
-    sales: Object.values(pick<Record<string, SaleRow>>('sales', {})),
     meta: pick<Meta>('meta', {}),
     products: Object.entries(all).filter(([k]) => k.startsWith('p:')).map(([, v]) => v as StoredProduct),
     drafts: pick<ListingDraft[]>('drafts', []),
     niches: pick<NicheResult[]>('niches', []),
     captureLog: pick<CaptureLogEntry[]>('captureLog', []),
-    replay: pick<ReplayTemplate[]>('replay', []),
+    templates: pick<Template[]>('templates', []),
+    syncState: pick<SyncState>('syncState', { status: 'idle', mode: 'quick', phase: '' }),
+    account: pick<AccountFacts | null>('account', null),
+    agentDismissed: pick<string[]>('agentDismissed', []),
   };
+}
+
+async function loadDb(): Promise<DbPart> {
+  const [sales, catalog, totals] = await Promise.all([getAll('sales'), getAll('catalog'), getAll('totals')]);
+  return { sales, catalog, totals };
 }
 
 export function useData(): Data | null {
   const [data, setData] = useState<Data | null>(null);
   useEffect(() => {
     let alive = true;
+    let storage: StoragePart | null = null;
+    let db: DbPart | null = null;
+    let version = 0;
     let timer = 0;
+    let wantDb = true;
+    const publish = () => {
+      if (alive && storage && db) setData({ ...storage, ...db, ready: true, dbVersion: version });
+    };
     const refresh = () => {
       clearTimeout(timer);
-      timer = window.setTimeout(() => {
-        void load().then((d) => alive && setData({ ...d, ready: true }));
-      }, 60);
+      timer = window.setTimeout(async () => {
+        const loadDbNow = wantDb;
+        wantDb = false;
+        const [s, d] = await Promise.all([loadStorage(), loadDbNow ? loadDb() : Promise.resolve(db)]);
+        storage = s;
+        if (loadDbNow) version += 1;
+        db = d;
+        publish();
+      }, 80);
     };
     refresh();
-    const off = onStorageChange(() => true, refresh);
+    const listener = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
+      if (area !== 'local') return;
+      if ('dataVersion' in changes) wantDb = true;
+      refresh();
+    };
+    chrome.storage.onChanged.addListener(listener);
     return () => {
       alive = false;
-      off();
+      chrome.storage.onChanged.removeListener(listener);
     };
   }, []);
   return data;

@@ -1,7 +1,8 @@
-// Runs in the page's own JavaScript world on merch.amazon.com, before the
-// dashboard's scripts. It observes the JSON the dashboard loads (fetch and
-// XHR) and hands a copy to Loupe's isolated content script. Nothing is
-// modified and nothing leaves the browser.
+// Runs in the page's own JavaScript world on merch.amazon.com (every frame),
+// before Merch's scripts. It observes the data Merch's pages load with your
+// signed-in session (fetch and XHR, any amazon.com API host) and hands a copy,
+// with the request that produced it, to Loupe's isolated content script.
+// Nothing is modified and nothing leaves the browser.
 
 (() => {
   const FLAG = '__loupeCapture';
@@ -9,20 +10,30 @@
   if (w[FLAG]) return;
   w[FLAG] = true;
 
-  const MAX_BYTES = 8 * 1024 * 1024;
+  const MAX_CHARS = 12 * 1024 * 1024;
   const origin = location.origin;
+  const TELEMETRY = /^(?:fls-|unagi|aax|aan\.|aws-?metrics|metrics|csm|sentry)/i;
 
-  const eligible = (url: string): boolean => {
+  const eligible = (raw: string): string | null => {
     try {
-      const u = new URL(url, origin);
-      return u.origin === origin && !/\.(?:js|css|png|jpe?g|gif|svg|woff2?|ico|map)$/i.test(u.pathname);
+      const u = new URL(raw, location.href);
+      if (u.protocol !== 'https:') return null;
+      if (!/(^|\.)amazon\.(?:com|co\.uk|de|fr|it|es|co\.jp)$/.test(u.hostname)) return null;
+      if (TELEMETRY.test(u.hostname)) return null;
+      if (/\.(?:js|css|png|jpe?g|gif|svg|webp|woff2?|ico|map|html?)$/i.test(u.pathname)) return null;
+      return u.href;
     } catch {
-      return false;
+      return null;
     }
   };
 
-  // The dashboard can load data before Loupe's isolated script is listening,
-  // so captures are held until it says it's ready.
+  /** JSON text, minus Angular's XSSI prefix; null when it isn't JSON. */
+  const jsonText = (text: string): string | null => {
+    const t = text.replace(/^\)\]\}',?\s*/, '').trimStart();
+    return t.startsWith('{') || t.startsWith('[') ? t : null;
+  };
+
+  // Captures wait until the isolated script says it's listening.
   let ready = false;
   const buffer: Array<Record<string, unknown>> = [];
   const deliver = (message: Record<string, unknown>) => {
@@ -34,7 +45,7 @@
   };
   const post = (message: Record<string, unknown>) => {
     if (ready) deliver(message);
-    else if (buffer.push(message) > 30) buffer.shift();
+    else if (buffer.push(message) > 40) buffer.shift();
   };
 
   const headersToObject = (headers: HeadersInit | undefined): Record<string, string> => {
@@ -42,7 +53,7 @@
     if (!headers) return out;
     try {
       new Headers(headers).forEach((value, key) => {
-        if (!/^(?:cookie|content-length)$/i.test(key)) out[key] = value;
+        if (!/^(?:cookie|content-length|host)$/i.test(key)) out[key] = value;
       });
     } catch {
       /* ignore malformed headers */
@@ -50,22 +61,39 @@
     return out;
   };
 
+  const bodyText = (body: unknown): string | undefined => {
+    if (typeof body === 'string') return body.length < 200_000 ? body : undefined;
+    if (body instanceof URLSearchParams) return body.toString();
+    return undefined;
+  };
+
   // ---- fetch ----
   const originalFetch = window.fetch;
   window.fetch = async function patchedFetch(this: unknown, input: RequestInfo | URL, init?: RequestInit) {
+    let reqBody: string | undefined;
+    const isRequest = typeof Request !== 'undefined' && input instanceof Request;
+    try {
+      reqBody = bodyText(init?.body);
+      if (reqBody === undefined && isRequest && (input as Request).method !== 'GET') {
+        reqBody = await (input as Request).clone().text().catch(() => undefined);
+      }
+    } catch {
+      /* ignore */
+    }
     const response = await originalFetch.call(this ?? window, input, init);
     try {
-      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
-      const type = response.headers.get('content-type') ?? '';
+      const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : (input as Request).url;
+      const url = eligible(raw);
       const length = Number(response.headers.get('content-length') ?? 0);
-      if (eligible(url) && /json/i.test(type) && length <= MAX_BYTES) {
-        const headers = headersToObject(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+      if (url && length <= MAX_CHARS && !/image|font|javascript|css|html/i.test(response.headers.get('content-type') ?? '')) {
+        const method = (init?.method ?? (isRequest ? (input as Request).method : 'GET')).toUpperCase();
+        const headers = headersToObject(init?.headers ?? (isRequest ? (input as Request).headers : undefined));
         response
           .clone()
           .text()
-          .then((body) => {
-            if (body.length <= MAX_BYTES) post({ url: new URL(url, origin).href, method, status: response.status, body, headers });
+          .then((text) => {
+            const json = text.length <= MAX_CHARS ? jsonText(text) : null;
+            if (json) post({ url, method, status: response.status, body: json, reqHeaders: headers, reqBody });
           })
           .catch(() => undefined);
       }
@@ -88,21 +116,24 @@
   } as typeof proto.open;
 
   proto.setRequestHeader = function (this: XMLHttpRequest & Tracked, name: string, value: string) {
-    if (this.__loupe && !/^(?:cookie|content-length)$/i.test(name)) this.__loupe.headers[name] = value;
+    if (this.__loupe && !/^(?:cookie|content-length|host)$/i.test(name)) this.__loupe.headers[name] = value;
     return setHeader.call(this, name, value);
   };
 
   proto.send = function (this: XMLHttpRequest & Tracked, body?: Document | XMLHttpRequestBodyInit | null) {
     const meta = this.__loupe;
-    if (meta && eligible(meta.url)) {
+    const url = meta ? eligible(meta.url) : null;
+    if (meta && url) {
+      const reqBody = bodyText(body);
       this.addEventListener('load', () => {
         try {
-          const type = this.getResponseHeader('content-type') ?? '';
-          if (!/json/i.test(type)) return;
-          const url = new URL(meta.url, origin).href;
-          if (this.responseType === 'json') post({ url, method: meta.method, status: this.status, json: this.response, headers: meta.headers });
-          else if (this.responseType === '' || this.responseType === 'text') {
-            if (this.responseText.length <= MAX_BYTES) post({ url, method: meta.method, status: this.status, body: this.responseText, headers: meta.headers });
+          if (/image|font|javascript|css|html/i.test(this.getResponseHeader('content-type') ?? '')) return;
+          const base = { url, method: meta.method, status: this.status, reqHeaders: meta.headers, reqBody };
+          if (this.responseType === 'json') {
+            if (this.response && typeof this.response === 'object') post({ ...base, json: this.response });
+          } else if (this.responseType === '' || this.responseType === 'text') {
+            const json = this.responseText.length <= MAX_CHARS ? jsonText(this.responseText) : null;
+            if (json) post({ ...base, body: json });
           }
         } catch {
           /* never break the page */
@@ -112,19 +143,11 @@
     return send.call(this, body);
   };
 
-  // ---- Replay: re-run requests that returned sales data, on Loupe's request ----
   window.addEventListener('message', (event) => {
     if (event.source !== window || event.origin !== origin) return;
-    const data = event.data as { __loupe?: string; requests?: Array<{ url: string; headers: Record<string, string> }> };
-    if (data?.__loupe === 'ready' && !ready) {
+    if ((event.data as { __loupe?: string })?.__loupe === 'ready' && !ready) {
       ready = true;
       buffer.splice(0).forEach(deliver);
-      return;
-    }
-    if (data?.__loupe !== 'replay' || !Array.isArray(data.requests)) return;
-    for (const request of data.requests.slice(0, 10)) {
-      if (!eligible(request.url)) continue;
-      window.fetch(request.url, { credentials: 'include', headers: request.headers }).catch(() => undefined);
     }
   });
 })();

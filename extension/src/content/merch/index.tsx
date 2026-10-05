@@ -1,30 +1,91 @@
-// Isolated-world script on merch.amazon.com. Receives the JSON the dashboard
-// loads (from main-world.ts), turns it into sales rows for the background
-// worker, and adds a small dock with listing tools on the create page.
+// Isolated-world script on merch.amazon.com.
+//  - Every frame: receives what Merch's pages load (from main-world.ts),
+//    learns templates and sends sales, products and account facts to the
+//    background worker.
+//  - Top frame: runs syncs the background worker asks for, shows sync
+//    progress, and adds the listing tools dock on the create page.
 
 import { useEffect, useState } from 'preact/hooks';
 import * as fmt from '../../shared/format';
+import { describeRequest, describeShape, learn, type Capture } from '../../shared/learn';
 import type { Message } from '../../shared/messages';
-import { normalizePayload, payloadShape } from '../../shared/sales';
 import type { Settings } from '../../shared/settings';
 import { get, getSettings, onStorageChange } from '../../shared/storage';
 import { scanText, type TermHit } from '../../shared/trademark';
-import type { ListingDraft, ReplayTemplate } from '../../shared/types';
-import { shiftDateParams } from '../../shared/replay';
+import type { ListingDraft, SyncState } from '../../shared/types';
 import { Alert, Close, External, Logo, Refresh, Shield, Wand } from '../../ui/icons';
 import { mount } from '../shared/mount';
 import { Emitter, useEmitter } from '../shared/store';
 import { BASE_CSS } from '../shared/styles';
 import { bulletsToDescription, fillListing, findAndReplace, findListingFields, type ListingField } from './fields';
+import { rememberHeaders, runSync } from './sync';
+
+const isTop = window.top === window;
+const send = (m: Message) => chrome.runtime.sendMessage(m).catch(() => undefined);
+
+// ---------- capture ----------
+
+interface RawCapture {
+  url: string;
+  method: string;
+  status: number;
+  body?: string;
+  json?: unknown;
+  reqHeaders?: Record<string, string>;
+  reqBody?: string;
+}
+
+function handleCapture(data: RawCapture) {
+  let payload: unknown = data.json;
+  if (payload === undefined && typeof data.body === 'string') {
+    try {
+      payload = JSON.parse(data.body);
+    } catch {
+      return;
+    }
+  }
+  if (payload === undefined || data.status >= 400) return;
+  const capture: Capture = {
+    url: data.url, method: data.method, status: data.status, headers: data.reqHeaders ?? {}, body: data.reqBody, payload, at: Date.now(),
+  };
+  rememberHeaders(capture.headers);
+  const learned = learn(capture);
+  void send({
+    type: 'capture:log',
+    entry: {
+      path: new URL(capture.url).pathname,
+      at: capture.at,
+      rows: learned.rows.length,
+      items: learned.items.length,
+      status: capture.status,
+      kind: learned.kind,
+      template: Boolean(learned.template),
+      request: describeRequest(capture.method, capture.url, capture.body),
+      keys: describeShape(payload, 40),
+    },
+  });
+  if (learned.account) void send({ type: 'account:merge', account: learned.account });
+  if (learned.rows.length) void send({ type: 'sales:ingest', rows: learned.rows });
+  if (learned.items.length) void send({ type: 'catalog:ingest', items: learned.items });
+  if (learned.template) void send({ type: 'template:save', template: learned.template });
+}
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window || event.origin !== location.origin) return;
+  if ((event.data as { __loupe?: string })?.__loupe === 'capture') handleCapture(event.data as RawCapture);
+});
+window.postMessage({ __loupe: 'ready' }, location.origin);
+
+// ---------- dock (top frame) ----------
 
 const DOCK_CSS = `
 .dock { position: fixed; left: 16px; bottom: 16px; z-index: 2147483646; }
-.fab {
+.lp .fab {
   display: inline-flex; align-items: center; gap: 8px; height: 38px; padding: 0 14px 0 10px; border-radius: 999px;
   background: #12141a; color: #fff; border: 0; box-shadow: 0 8px 24px rgba(18,20,26,.22); font-weight: 600;
 }
-.fab .count { background: var(--critical); color: #fff; border-radius: 999px; font-size: 11px; padding: 1px 7px; }
-.fab .ok { background: rgba(255,255,255,.14); border-radius: 999px; font-size: 11px; padding: 1px 7px; font-weight: 500; }
+.lp .fab .count { background: var(--critical); color: #fff; border-radius: 999px; font-size: 11px; padding: 1px 7px; }
+.lp .fab .ok { background: rgba(255,255,255,.14); border-radius: 999px; font-size: 11px; padding: 1px 7px; font-weight: 500; }
 .card {
   width: 340px; max-height: calc(100vh - 32px); overflow: auto; background: var(--surface); border: 1px solid var(--line);
   border-radius: 14px; box-shadow: 0 16px 48px rgba(18,20,26,.18);
@@ -46,17 +107,31 @@ input.text, select.text {
 .hits svg { flex: none; margin-top: 1px; }
 .okline { display: flex; gap: 6px; align-items: center; color: var(--good-ink); font-size: 12px; }
 .note { font-size: 11px; color: var(--muted); }
+.banner {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 2147483647; width: min(560px, calc(100vw - 24px));
+  background: #12141a; color: #fff; border-radius: 12px; padding: 12px 14px; box-shadow: 0 16px 48px rgba(0,0,0,.3); display: grid; gap: 8px;
+}
+.banner .row { display: flex; align-items: center; gap: 10px; }
+.banner .title { font-weight: 650; }
+.banner .sub { font-size: 12px; color: #c3c6cf; }
+.banner .bar { height: 4px; background: rgba(255,255,255,.15); border-radius: 999px; overflow: hidden; }
+.banner .bar > div { height: 100%; background: #8b80ff; transition: width .3s; }
+.banner .bar.indeterminate > div { width: 30%; animation: slide 1.2s ease-in-out infinite; }
+@keyframes slide { from { margin-left: -30%; } to { margin-left: 100%; } }
+.lp.banner .btn { background: rgba(255,255,255,.1); border-color: rgba(255,255,255,.2); color: #fff; }
+.banner.done { background: #0f2a17; }
+.banner.bad { background: #3a1416; }
 `;
 
 class MerchState extends Emitter {
   open = false;
   fields: ListingField[] = [];
   hits: TermHit[] = [];
-  lastCaptureAt = 0;
-  lastRows = 0;
-  totalRows = 0;
   drafts: ListingDraft[] = [];
   message = '';
+  sync: SyncState | null = null;
+  lastSync = 0;
+  bannerClosed = false;
   settings!: Settings;
 
   scanFields() {
@@ -94,17 +169,43 @@ class MerchState extends Emitter {
 
 const state = new MerchState();
 
-async function replay() {
-  const templates = await get('replay');
-  if (!templates.length) {
-    state.say('Nothing to refresh yet. Open your sales report once so Loupe can learn it.');
-    return;
-  }
-  const requests = templates
-    .filter((t) => new URL(t.url).origin === location.origin)
-    .map((t) => ({ url: shiftDateParams(t.url, t.capturedAt), headers: t.headers }));
-  window.postMessage({ __loupe: 'replay', requests }, location.origin);
-  state.say('Refreshing sales…');
+function SyncBanner() {
+  useEmitter(state);
+  const s = state.sync;
+  if (!s || state.bannerClosed) return null;
+  const mine = s.tabId !== undefined && s.status !== 'idle';
+  if (!mine || (s.status === 'running' && s.mode === 'quick')) return null;
+  if (s.status !== 'running' && (s.finishedAt ?? 0) < Date.now() - 10 * 60_000) return null;
+  const pct = s.progress && s.progress.total ? Math.round((s.progress.done / s.progress.total) * 100) : null;
+  const tone = s.status === 'done' ? 'done' : s.status === 'error' || s.status === 'signin' ? 'bad' : '';
+  return (
+    <div class={`lp banner ${tone}`} role="status" aria-live="polite">
+      <div class="row">
+        <Logo size={20} />
+        <span class="title grow">
+          {s.status === 'running' ? 'Loupe is syncing your Merch account' : s.status === 'done' ? 'Loupe is connected' : s.status === 'partial' ? 'Loupe is partly connected' : 'Loupe could not finish the sync'}
+        </span>
+        {s.status !== 'running' && (
+          <>
+            <button class="btn sm" onClick={() => void send({ type: 'open-dashboard', hash: s.status === 'done' ? 'agent' : 'settings?section=diagnostics' })}>
+              {s.status === 'done' ? 'Open your agent' : 'Details'}
+            </button>
+            <button class="btn sm icon" title="Close" onClick={() => { state.bannerClosed = true; state.emit(); }}><Close size={13} /></button>
+          </>
+        )}
+      </div>
+      <div class="sub">
+        {s.phase}
+        {s.status === 'running' && pct !== null ? ` · ${pct}%` : ''}
+        {s.status !== 'running' && s.stats ? ` · ${s.stats.salesRows.toLocaleString()} sales rows, ${s.stats.catalogItems.toLocaleString()} products` : ''}
+      </div>
+      {s.status === 'running' && (
+        <div class={`bar ${pct === null ? 'indeterminate' : ''}`}><div style={pct === null ? undefined : { width: `${pct}%` }} /></div>
+      )}
+      {s.status === 'running' && <div class="sub">Keep this tab open. You can keep working in other tabs.</div>}
+      {s.error && s.status !== 'running' && <div class="sub">{s.error}</div>}
+    </div>
+  );
 }
 
 function Dock() {
@@ -118,7 +219,7 @@ function Dock() {
   }, [state.drafts.length]);
 
   const listing = state.fields.length >= 2;
-  const risky = state.hits.filter((h) => h.severity === 'high').length;
+  const syncing = state.sync?.status === 'running';
 
   if (!state.open) {
     return (
@@ -128,7 +229,8 @@ function Dock() {
           Loupe
           {listing && state.hits.length > 0 && <span class="count">{state.hits.length}</span>}
           {listing && state.hits.length === 0 && <span class="ok">Listing OK</span>}
-          {!listing && state.lastCaptureAt > 0 && <span class="ok">Synced {fmt.ago(state.lastCaptureAt)}</span>}
+          {!listing && syncing && <span class="ok">Syncing…</span>}
+          {!listing && !syncing && state.lastSync > 0 && <span class="ok">Synced {fmt.ago(state.lastSync)}</span>}
         </button>
       </div>
     );
@@ -140,7 +242,7 @@ function Dock() {
         <div class="head">
           <span class="brandmark"><Logo size={18} /> Loupe</span>
           <span class="grow" />
-          <button class="btn sm icon ghost" title="Open dashboard" onClick={() => void chrome.runtime.sendMessage({ type: 'open-dashboard' } satisfies Message)}>
+          <button class="btn sm icon ghost" title="Open dashboard" onClick={() => void send({ type: 'open-dashboard' })}>
             <External size={14} />
           </button>
           <button class="btn sm icon ghost" title="Close" onClick={() => { state.open = false; state.emit(); }}>
@@ -149,15 +251,18 @@ function Dock() {
         </div>
         <div class="body">
           <div>
-            <h4>Sales sync</h4>
+            <h4>Account sync</h4>
             <div class="sync">
               <span class="grow">
-                {state.lastCaptureAt
-                  ? <>Synced <b>{state.totalRows.toLocaleString()}</b> sales rows · {fmt.ago(state.lastCaptureAt)}</>
-                  : <>Open your <b>sales report</b> (Analyze) and Loupe records it automatically.</>}
+                {syncing ? <>{state.sync?.phase}</> : state.lastSync ? <>Last synced {fmt.ago(state.lastSync)}</> : <>Not synced yet.</>}
               </span>
-              <button class="btn sm" onClick={() => void replay()} title="Re-load the sales reports Loupe has seen">
-                <Refresh size={13} /> Refresh
+              <button
+                class="btn sm"
+                disabled={syncing}
+                onClick={() => void send({ type: 'sync:start', mode: state.lastSync ? 'full' : 'connect', interactive: true })}
+                title="Download your latest sales and products"
+              >
+                <Refresh size={13} /> Sync now
               </button>
             </div>
           </div>
@@ -231,7 +336,6 @@ function Dock() {
                 ) : (
                   <div class="okline"><Shield size={14} /> No famous marks or policy terms found.</div>
                 )}
-                {risky > 0 && <div class="note" style={{ marginTop: '6px' }}>Still check every phrase on USPTO before publishing.</div>}
               </div>
             </>
           ) : (
@@ -244,57 +348,25 @@ function Dock() {
   );
 }
 
-function handleCapture(data: { url: string; method: string; status: number; body?: string; json?: unknown; headers?: Record<string, string> }) {
-  let payload: unknown = data.json;
-  if (payload === undefined && typeof data.body === 'string') {
-    try {
-      payload = JSON.parse(data.body);
-    } catch {
-      return;
-    }
-  }
-  if (payload === undefined || data.status >= 400) return;
-  const rows = normalizePayload(payload, data.url);
-  const path = new URL(data.url).pathname;
-  void chrome.runtime.sendMessage({
-    type: 'capture:log',
-    entry: { path, at: Date.now(), rows: rows.length, status: data.status, keys: payloadShape(payload) },
-  } satisfies Message);
-  if (!rows.length) return;
-  void chrome.runtime.sendMessage({ type: 'sales:ingest', rows } satisfies Message);
-  if (data.method === 'GET') {
-    const template: ReplayTemplate = { url: data.url, headers: data.headers ?? {}, capturedAt: Date.now(), rows: rows.length };
-    void chrome.runtime.sendMessage({ type: 'replay:save', template } satisfies Message);
-  }
-}
-
 async function boot() {
-  if (window.top !== window) return;
-  // Listen before anything async, then tell the page script to flush what it buffered.
-  window.addEventListener('message', (event) => {
-    if (event.source !== window || event.origin !== location.origin) return;
-    if ((event.data as { __loupe?: string })?.__loupe === 'capture') handleCapture(event.data);
-  });
-  window.postMessage({ __loupe: 'ready' }, location.origin);
-
   state.settings = await getSettings();
-  const [meta, sales, drafts] = await Promise.all([get('meta'), get('sales'), get('drafts')]);
-  state.lastCaptureAt = meta.lastCaptureAt ?? 0;
-  state.totalRows = Object.keys(sales).length;
+  const [drafts, sync, meta] = await Promise.all([get('drafts'), get('syncState'), get('meta')]);
   state.drafts = drafts;
+  state.sync = sync;
+  state.lastSync = meta.lastCaptureAt ?? 0;
 
-  onStorageChange(['meta', 'sales', 'drafts', 'settings'], async () => {
-    const [m, s, d] = await Promise.all([get('meta'), get('sales'), get('drafts')]);
-    state.lastCaptureAt = m.lastCaptureAt ?? 0;
-    state.totalRows = Object.keys(s).length;
+  onStorageChange(['drafts', 'settings', 'syncState', 'meta'], async () => {
+    const [d, s, m] = await Promise.all([get('drafts'), get('syncState'), get('meta')]);
     state.drafts = d;
+    state.sync = s;
+    state.lastSync = m.lastCaptureAt ?? 0;
     state.settings = await getSettings();
     state.emit();
   });
 
   chrome.runtime.onMessage.addListener((message: Message, _sender, respond) => {
-    if (message.type === 'merch:replay') {
-      void replay();
+    if (message.type === 'sync:run') {
+      void get('syncState').then((s) => runSync(message.mode, s));
       respond({ ok: true });
     } else if (message.type === 'listing:fill') {
       state.scanFields();
@@ -307,7 +379,7 @@ async function boot() {
 
   const host = document.createElement('loupe-dock');
   document.documentElement.appendChild(host);
-  mount(host, BASE_CSS + DOCK_CSS, <Dock />);
+  mount(host, BASE_CSS + DOCK_CSS, <><SyncBanner /><Dock /></>);
 
   state.scanFields();
   let timer = 0;
@@ -319,6 +391,10 @@ async function boot() {
     clearTimeout(timer);
     timer = window.setTimeout(() => state.checkTrademarks(), 400);
   }, true);
+
+  // Resume a sync that navigated to this page.
+  const who = (await chrome.runtime.sendMessage({ type: 'sync:whoami' } satisfies Message).catch(() => null)) as { run?: boolean; mode?: SyncState['mode'] } | null;
+  if (who?.run && who.mode) void runSync(who.mode, await get('syncState'));
 }
 
-void boot();
+if (isTop) void boot();

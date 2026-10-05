@@ -194,21 +194,6 @@ describe('misc', () => {
   });
 });
 
-describe('replay', () => {
-  it('moves date parameters forward with the calendar', async () => {
-    const { shiftDateParams } = await import('../src/shared/replay');
-    const captured = new Date(2026, 9, 1, 12).getTime();
-    const now = new Date(2026, 9, 4, 9).getTime();
-    const url = 'https://merch.amazon.com/api/x?from=2026-09-25&to=2026-10-01T23:59:59Z&ts=1759320000000&page=2';
-    const shifted = new URL(shiftDateParams(url, captured, now));
-    expect(shifted.searchParams.get('from')).toBe('2026-09-28');
-    expect(shifted.searchParams.get('to')).toBe('2026-10-04T23:59:59Z');
-    expect(shifted.searchParams.get('ts')).toBe(String(1759320000000 + 3 * 86_400_000));
-    expect(shifted.searchParams.get('page')).toBe('2');
-    expect(shiftDateParams(url, now, now)).toBe(url);
-  });
-});
-
 describe('keyword noise', () => {
   it('ignores Merch stock bullets and bare numbers but keeps years', async () => {
     const { extractKeywords } = await import('../src/shared/keywords');

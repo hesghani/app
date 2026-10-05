@@ -6,7 +6,10 @@ import { PRODUCT_TYPES } from '../../shared/products';
 import { TIER_LABELS, type RoyaltyTier } from '../../shared/royalty';
 import { importSalesCsv, rowKey } from '../../shared/sales';
 import { DEFAULT_SETTINGS, type Settings as SettingsT } from '../../shared/settings';
+import { bump, clearStore, getAll, putMany, type Keyed } from '../../shared/db';
 import { exportAll, get, importAll, saveSettings, set } from '../../shared/storage';
+import type { CatalogItem, RangeTotal, SaleRow } from '../../shared/types';
+import { ConnectCard, CopyReport } from './connect';
 import { Card, Notice, NumberInput, Seg, Switch, useToast } from '../../ui/components';
 import { Download, Trash, Upload } from '../../ui/icons';
 import type { Data, Route } from '../data';
@@ -101,18 +104,26 @@ export function Settings({ data, route }: { data: Data; route: Route }) {
         </div>
       </Card>
 
-      <Card title="Merch on Demand sync">
+      <Card title={<h2 id="s-account">Merch account and sync</h2>}>
         <div class="stack">
-          <Switch checked={settings.notifications} onChange={(v) => void save({ notifications: v })} label="Notify me of new sales" hint="A desktop notification when a synced report shows new units today." />
-          <Switch checked={settings.badge} onChange={(v) => void save({ badge: v })} label="Show today's units on the toolbar icon" />
+          <ConnectCard data={data} compact />
+          <Switch checked={settings.autoSync} onChange={(v) => void save({ autoSync: v })} label="Sync automatically" hint="Downloads today's sales on a schedule, and your product list once a day." />
           <Switch
-            checked={settings.liveRefresh}
-            onChange={(v) => void save({ liveRefresh: v })}
-            label="Live refresh"
-            hint="While a Merch tab is open, quietly re-load the sales reports Loupe has seen, so notifications arrive without you clicking around."
+            checked={settings.backgroundTabSync}
+            onChange={(v) => void save({ backgroundTabSync: v })}
+            label="Open Merch in a background tab when needed"
+            hint="If no Merch tab is open, Loupe briefly opens one in the background to sync, then closes it."
           />
+          <Switch checked={settings.notifications} onChange={(v) => void save({ notifications: v })} label="Notify me of new sales" />
+          <Switch checked={settings.badge} onChange={(v) => void save({ badge: v })} label="Show today's units on the toolbar icon" />
           <div class="row wrap">
-            <label class="field" style={{ width: '170px' }}><span>Live refresh every (minutes)</span><NumberInput value={settings.liveRefreshMinutes} min={5} max={240} onChange={(n) => void save({ liveRefreshMinutes: Math.max(5, n) })} /></label>
+            <label class="field" style={{ width: '170px' }}><span>Sync every (minutes)</span><NumberInput value={settings.syncMinutes} min={10} max={720} onChange={(n) => void save({ syncMinutes: Math.max(10, n) })} /></label>
+            <label class="field" style={{ width: '170px' }}><span>Sales history to download (days)</span><NumberInput value={settings.historyDays} min={30} max={1500} onChange={(n) => void save({ historyDays: Math.min(1500, Math.max(30, n)) })} /></label>
+            <label class="field" style={{ width: '170px' }}>
+              <span>Your tier (design slots)</span>
+              <NumberInput value={settings.tier ?? data.account?.tier ?? 0} min={0} step={10} onChange={(n) => void save({ tier: n > 0 ? n : null })} />
+              <span class="hint">{data.account?.tier ? `Merch reports tier ${data.account.tier}` : 'Used for slot math in the agent'}</span>
+            </label>
             <label class="field" style={{ width: '200px' }}><span>Merch removes listings idle for (months)</span><NumberInput value={settings.inactivityMonths} min={1} max={60} onChange={(n) => void save({ inactivityMonths: Math.max(1, n) })} /></label>
             <label class="field" style={{ width: '200px' }}><span>Re-check tracked BSRs every (hours)</span><NumberInput value={settings.watchRefreshHours} min={1} max={168} onChange={(n) => void save({ watchRefreshHours: Math.max(1, n) })} /></label>
           </div>
@@ -157,10 +168,13 @@ export function Settings({ data, route }: { data: Data; route: Route }) {
                     return;
                   }
                   const meta = await get('meta');
-                  const store = meta.demo ? {} : await get('sales');
-                  for (const r of result.rows) store[rowKey(r)] = r;
-                  await set('sales', store);
+                  if (meta.demo) {
+                    await clearStore('sales');
+                    await clearStore('catalog');
+                  }
+                  await putMany('sales', result.rows.map((r) => ({ ...r, key: rowKey(r) })));
                   await set('meta', { ...meta, demo: false });
+                  await bump('sales', 'catalog');
                   toast(`Imported ${result.rows.length} rows${result.skipped ? `, skipped ${result.skipped}` : ''}`);
                 }}
               >
@@ -183,7 +197,13 @@ export function Settings({ data, route }: { data: Data; route: Route }) {
           </div>
           <div class="divider" />
           <div class="row wrap">
-            <button class="btn" onClick={async () => download(`loupe-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(await exportAll()), 'application/json')}>
+            <button
+              class="btn"
+              onClick={async () => {
+                const [storage, sales, catalog, totals] = await Promise.all([exportAll(), getAll('sales'), getAll('catalog'), getAll('totals')]);
+                download(`loupe-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify({ loupeBackup: 2, storage, sales, catalog, totals }), 'application/json');
+              }}
+            >
               <Download size={14} /> Back up everything
             </button>
             <button
@@ -193,9 +213,21 @@ export function Settings({ data, route }: { data: Data; route: Route }) {
                 if (!file) return;
                 try {
                   const parsed = JSON.parse(file.text) as Record<string, unknown>;
-                  if (typeof parsed !== 'object' || !parsed || !('settings' in parsed || 'sales' in parsed)) throw new Error('Not a Loupe backup');
+                  const v2 = parsed.loupeBackup === 2;
+                  if (!v2 && !('settings' in parsed || 'sales' in parsed)) throw new Error('Not a Loupe backup');
                   if (!confirm('Replace all Loupe data with this backup?')) return;
-                  await importAll(parsed);
+                  const storage = (v2 ? parsed.storage : parsed) as Record<string, unknown>;
+                  const legacySales = !v2 && storage.sales && typeof storage.sales === 'object' ? Object.values(storage.sales as Record<string, SaleRow>) : [];
+                  const { sales: _legacy, ...rest } = storage;
+                  await importAll({ ...rest, meta: { ...((rest.meta as object) ?? {}), migratedToDb: true } });
+                  await Promise.all([clearStore('sales'), clearStore('catalog'), clearStore('totals')]);
+                  const sales = v2 ? (parsed.sales as Array<Keyed<SaleRow>>) : legacySales.map((r) => ({ ...r, key: rowKey(r) }));
+                  await putMany('sales', sales);
+                  if (v2) {
+                    await putMany('catalog', parsed.catalog as CatalogItem[]);
+                    await putMany('totals', parsed.totals as RangeTotal[]);
+                  }
+                  await bump('sales', 'catalog', 'totals');
                   toast('Backup restored');
                 } catch (e) {
                   toast((e as Error).message);
@@ -212,20 +244,23 @@ export function Settings({ data, route }: { data: Data; route: Route }) {
               class="btn danger"
               disabled={!data.sales.length}
               onClick={async () => {
-                if (!confirm(`Delete all ${data.sales.length} sales rows?`)) return;
-                await set('sales', {});
-                await set('meta', { ...(await get('meta')), demo: false });
+                if (!confirm(`Delete all ${data.sales.length} sales rows and ${data.catalog.length} products?`)) return;
+                await Promise.all([clearStore('sales'), clearStore('catalog'), clearStore('totals')]);
+                await set('meta', { ...(await get('meta')), demo: false, coverage: undefined });
+                await bump('sales', 'catalog', 'totals');
                 void chrome.runtime.sendMessage({ type: 'badge:refresh' });
                 toast('Sales cleared');
               }}
             >
-              <Trash size={14} /> Clear sales
+              <Trash size={14} /> Clear sales and products
             </button>
             <button
               class="btn danger"
               onClick={async () => {
-                if (!confirm('Delete everything Loupe has stored: sales, watchlist, drafts and settings?')) return;
+                if (!confirm('Delete everything Loupe has stored: sales, products, watchlist, drafts and settings?')) return;
                 await chrome.storage.local.clear();
+                await Promise.all([clearStore('sales'), clearStore('catalog'), clearStore('totals')]);
+                await bump('sales', 'catalog', 'totals');
                 void chrome.runtime.sendMessage({ type: 'badge:refresh' });
                 toast('All data deleted');
               }}
@@ -236,21 +271,40 @@ export function Settings({ data, route }: { data: Data; route: Route }) {
         </div>
       </Card>
 
-      <Card title={<h2 id="s-diagnostics">Sync diagnostics</h2>}>
+      <Card title={<h2 id="s-diagnostics">Sync diagnostics</h2>} actions={<CopyReport data={data} />}>
         <p class="hint" style={{ marginBottom: '10px' }}>
-          Merch on Demand has no public API. Loupe reads the JSON its dashboard loads and keeps any records that look like sales (an ASIN plus units or royalties).
-          If sales don't appear, this shows what Loupe saw.
+          Merch on Demand has no public API. Loupe learns from the requests Merch's own pages make while you're signed in, then repeats them for other dates,
+          marketplaces and pages. This lists what it saw. The sync report describes these requests without any values, titles or personal data.
         </p>
+        {data.templates.length > 0 && (
+          <div class="table-wrap" style={{ marginBottom: '12px' }}>
+            <table class="table">
+              <thead><tr><th>Learned request</th><th>Kind</th><th>Dates</th><th>Paging</th><th class="num">Learned</th></tr></thead>
+              <tbody>
+                {data.templates.map((t) => (
+                  <tr>
+                    <td class="small" style={{ fontFamily: 'ui-monospace, monospace', wordBreak: 'break-all' }}>{t.method} {new URL(t.url).pathname}</td>
+                    <td><span class="pill neutral">{t.kind}{t.dated ? ' · daily' : ''}</span></td>
+                    <td class="small">{t.window ? `${t.dates.map((d) => d.format).join(', ')}` : 'fixed'}</td>
+                    <td class="small">{t.tokenKey ? 'token' : t.pages.map((p) => p.role).join(', ') || 'single page'}</td>
+                    <td class="num muted small">{fmt.ago(t.capturedAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
         {data.captureLog.length ? (
           <div class="table-wrap">
             <table class="table">
-              <thead><tr><th>Endpoint</th><th class="num">Sales rows</th><th>Shape</th><th class="num">Seen</th></tr></thead>
+              <thead><tr><th>Response</th><th class="num">Sales rows</th><th class="num">Products</th><th>Shape</th><th class="num">Seen</th></tr></thead>
               <tbody>
                 {data.captureLog.map((e) => (
                   <tr>
-                    <td class="small" style={{ fontFamily: 'ui-monospace, monospace' }}>{e.path}</td>
+                    <td class="small" style={{ fontFamily: 'ui-monospace, monospace', wordBreak: 'break-all' }}>{e.path}</td>
                     <td class="num">{e.rows ? <span class="pill good">{e.rows}</span> : <span class="muted">0</span>}</td>
-                    <td class="small muted ellipsis" style={{ maxWidth: '280px' }} title={e.keys.join(', ')}>{e.keys.join(', ')}</td>
+                    <td class="num">{e.items ? <span class="pill good">{e.items}</span> : <span class="muted">0</span>}</td>
+                    <td class="small muted ellipsis" style={{ maxWidth: '280px' }} title={e.keys.join('\n')}>{e.keys.slice(0, 4).join(' · ')}</td>
                     <td class="num muted small">{fmt.ago(e.at)}</td>
                   </tr>
                 ))}
@@ -258,12 +312,11 @@ export function Settings({ data, route }: { data: Data; route: Route }) {
             </table>
           </div>
         ) : (
-          <Notice>Nothing captured yet. Open merch.amazon.com and visit your sales report.</Notice>
+          <Notice>Nothing seen yet. Click <b>Connect Merch account</b> above, or open merch.amazon.com.</Notice>
         )}
-        {data.replay.length > 0 && (
+        {data.templates.length > 0 && (
           <p class="small muted" style={{ marginTop: '10px' }}>
-            Refresh re-loads {data.replay.length} report{data.replay.length > 1 ? 's' : ''}: {data.replay.map((t) => new URL(t.url).pathname).join(', ')}.{' '}
-            <button class="btn sm ghost" onClick={async () => { await set('replay', []); toast('Forgot saved reports'); }}>Forget</button>
+            <button class="btn sm ghost" onClick={async () => { await set('templates', []); toast('Forgot learned requests. Loupe will relearn them on the next sync.'); }}>Forget learned requests</button>
           </p>
         )}
       </Card>

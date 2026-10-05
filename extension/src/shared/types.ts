@@ -73,14 +73,11 @@ export interface CaptureLogEntry {
   rows: number;
   status: number;
   keys: string[];
-}
-
-/** A GET request on merch.amazon.com that returned sales data and can be replayed. */
-export interface ReplayTemplate {
-  url: string;
-  headers: Record<string, string>;
-  capturedAt: number;
-  rows: number;
+  /** Redacted request description: parameter names and value kinds only. */
+  request?: string;
+  kind?: 'sales' | 'catalog' | 'none';
+  items?: number;
+  template?: boolean;
 }
 
 export interface NicheResult {
@@ -96,4 +93,66 @@ export interface NicheResult {
   avgReviews: number | null;
   score: number;
   top: Array<Pick<ProductData, 'asin' | 'title' | 'bsr' | 'firstAvailable' | 'price' | 'reviews' | 'image'>>;
+}
+
+export type CatalogStatus = 'live' | 'review' | 'processing' | 'rejected' | 'draft' | 'removed' | 'other';
+
+/** One listing from the Merch catalog (one product type in one marketplace). */
+export interface CatalogItem {
+  key: string;
+  asin: string | null;
+  /** Merch's own id for the product or listing, when it has one. */
+  id: string | null;
+  designId: string | null;
+  title: string;
+  brand: string;
+  productType: ProductType | null;
+  marketplace: MarketplaceId | null;
+  status: CatalogStatus;
+  rawStatus: string;
+  price: number | null;
+  /** When the listing was created or published, YYYY-MM-DD. */
+  createdAt: string | null;
+  image: string | null;
+  seenAt: number;
+}
+
+/** Sales for one product over a window, for reports that don't break sales down by day. */
+export interface RangeTotal {
+  key: string;
+  days: number;
+  to: string;
+  marketplace: MarketplaceId;
+  asin: string;
+  title: string;
+  productType: ProductType | null;
+  units: number;
+  cancelled: number;
+  returned: number;
+  royalty: number;
+  currency: Currency;
+  fetchedAt: number;
+}
+
+export type SyncMode = 'connect' | 'full' | 'quick';
+
+export interface SyncState {
+  status: 'idle' | 'running' | 'done' | 'partial' | 'error' | 'signin';
+  mode: SyncMode;
+  phase: string;
+  progress?: { done: number; total: number };
+  startedAt?: number;
+  finishedAt?: number;
+  tabId?: number;
+  openedTab?: boolean;
+  visited?: string[];
+  stats?: { salesRows: number; catalogItems: number; requests: number; errors: number };
+  error?: string;
+}
+
+/** Numbers about the account (tier, limits) found in Merch's responses. */
+export interface AccountFacts {
+  tier?: number;
+  facts: Record<string, number>;
+  seenAt: number;
 }

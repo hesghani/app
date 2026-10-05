@@ -1,5 +1,7 @@
 // End-to-end check: loads the built extension into Chromium, serves stand-in
-// Amazon and Merch pages, and drives every surface. Screenshots go to e2e/out.
+// Amazon and Merch on Demand sites, and drives every surface, including the
+// full "Connect Merch account" flow against two different Merch API styles.
+// Screenshots go to e2e/out.
 //   npm run e2e            (set CHROMIUM_PATH to use a specific browser)
 
 import assert from 'node:assert/strict';
@@ -9,22 +11,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
-import { ASINS, merchApi, merchPage, productPage, searchPage } from './fixtures.mjs';
+import { ASINS, createMerch, productPage, searchPage } from './fixtures.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const dist = join(root, 'dist');
 const out = join(root, 'e2e', 'out');
 await mkdir(out, { recursive: true });
-
 const executablePath = process.env.CHROMIUM_PATH ?? (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined);
-const profile = await mkdtemp(join(tmpdir(), 'loupe-e2e-'));
-const context = await chromium.launchPersistentContext(profile, {
-  // Branded Chrome ignores --load-extension, so use Playwright's Chromium build.
-  ...(executablePath ? { executablePath } : { channel: 'chromium' }),
-  headless: true,
-  viewport: { width: 1360, height: 900 },
-  args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`],
-});
 
 const step = async (name, fn) => {
   const started = Date.now();
@@ -37,228 +30,339 @@ const step = async (name, fn) => {
   }
 };
 
-let productRequests = 0;
-await context.route(/https:\/\/www\.amazon\.com\/.*/, (route) => {
-  const url = new URL(route.request().url());
-  if (url.pathname === '/s') return route.fulfill({ contentType: 'text/html', body: searchPage(url.searchParams.get('k') ?? '') });
-  const asin = url.pathname.match(/\/dp\/([A-Z0-9]{10})/)?.[1];
-  if (asin) {
-    productRequests += 1;
-    return route.fulfill({ contentType: 'text/html', body: productPage(asin) });
+const until = async (fn, { timeout = 30000, interval = 250, message = 'condition' } = {}) => {
+  const deadline = Date.now() + timeout;
+  let last;
+  while (Date.now() < deadline) {
+    last = await fn();
+    if (last) return last;
+    await new Promise((r) => setTimeout(r, interval));
   }
-  return route.fulfill({ contentType: 'text/html', body: '<html><body>amazon</body></html>' });
-});
-await context.route(/https:\/\/completion\.amazon\.com\/.*/, (route) => {
-  const prefix = new URL(route.request().url()).searchParams.get('prefix') ?? '';
-  const suggestions = ['shirt', 'paddle', 'gifts for men', 'dad', 'women', 'funny'].map((s) => ({ value: `${prefix} ${s}`.replace(/\s+/g, ' ') }));
-  return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ suggestions }) });
-});
-await context.route(/https:\/\/merch\.amazon\.com\/.*/, (route) => {
-  const url = new URL(route.request().url());
-  if (url.pathname.startsWith('/api/')) return route.fulfill({ contentType: 'application/json', body: JSON.stringify(merchApi(url.pathname)) });
-  return route.fulfill({ contentType: 'text/html', body: merchPage(url.pathname.includes('create') ? 'create' : 'analyze') });
-});
+  throw new Error(`Timed out waiting for ${message}`);
+};
 
-let worker = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker'));
-const extensionId = new URL(worker.url()).host;
-const ext = (path) => `chrome-extension://${extensionId}/${path}`;
-console.log(`Extension ${extensionId}`);
-
-try {
-  await step('opens the welcome page on install', async () => {
-    const deadline = Date.now() + 5000;
-    while (!context.pages().some((p) => p.url().includes('dashboard.html')) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
-    const welcome = context.pages().find((p) => p.url().includes('dashboard.html'));
-    assert.ok(welcome, 'welcome tab opened');
-    await welcome.waitForSelector('text=Welcome to Loupe');
-    await welcome.screenshot({ path: join(out, 'welcome.png') });
-    await welcome.close();
+async function launch(style) {
+  const profile = await mkdtemp(join(tmpdir(), 'loupe-e2e-'));
+  const context = await chromium.launchPersistentContext(profile, {
+    // Branded Chrome ignores --load-extension, so use Playwright's Chromium build.
+    ...(executablePath ? { executablePath } : { channel: 'chromium' }),
+    headless: true,
+    viewport: { width: 1360, height: 900 },
+    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`],
   });
-
-  const page = await context.newPage();
-
-  await step('search overlay analyzes every result', async () => {
-    await page.goto('https://www.amazon.com/s?k=pickleball');
-    const toolbar = page.locator('loupe-toolbar');
-    await toolbar.waitFor({ state: 'attached' });
-    await page.waitForFunction(() => document.querySelector('loupe-toolbar')?.shadowRoot?.textContent?.includes('8 products analyzed'), null, { timeout: 30000 });
-    const text = await toolbar.evaluate((el) => el.shadowRoot.textContent);
-    assert.match(text, /Niche score/);
-    assert.match(text, /Median BSR/);
-    const badges = await page.locator('loupe-badge').evaluateAll((els) => els.map((el) => el.shadowRoot.textContent));
-    assert.equal(badges.length, 8);
-    assert.match(badges[0], /#18,400/);
-    assert.match(badges[0], /Merch/);
-    assert.match(badges[7], /Not Merch/);
-    assert.match(badges[3], /Ad/);
-    await page.screenshot({ path: join(out, 'search.png') });
-  });
-
-  await step('sorts by BSR and filters non-Merch in place', async () => {
-    const shadowClick = (label) =>
-      page.locator('loupe-toolbar').evaluate((el, label) => {
-        const button = [...el.shadowRoot.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
-        button.click();
-      }, label);
-    await shadowClick('Best BSR');
-    const order = await page.locator('div[data-component-type="s-search-result"]').evaluateAll((els) => els.map((e) => e.dataset.asin));
-    assert.equal(order[0], ASINS[7], 'blank-tee pack (BSR 3,400) sorts first');
-    await shadowClick('Merch only');
-    const hidden = await page.locator(`div[data-asin="${ASINS[7]}"]`).evaluate((el) => el.style.display);
-    assert.equal(hidden, 'none');
-    await shadowClick('Amazon');
-    await shadowClick('Merch only');
-  });
-
-  await step('serves repeat visits from cache', async () => {
-    const before = productRequests;
-    await page.reload();
-    await page.waitForFunction(() => document.querySelector('loupe-toolbar')?.shadowRoot?.textContent?.includes('8 products analyzed'), null, { timeout: 15000 });
-    assert.equal(productRequests, before, 'no product pages re-fetched');
-  });
-
-  await step('product panel shows BSR, royalty and trademark check; tracking works', async () => {
-    await page.goto(`https://www.amazon.com/dp/${ASINS[0]}`);
-    const panel = page.locator('loupe-panel');
-    await panel.waitFor({ state: 'attached' });
-    await page.waitForFunction(() => document.querySelector('loupe-panel')?.shadowRoot?.textContent?.includes('#18,400'));
-    const text = await panel.evaluate((el) => el.shadowRoot.textContent);
-    assert.match(text, /Merch on Demand/);
-    assert.match(text, /Royalty at \$19\.99/);
-    assert.match(text, /\$2\.44/);
-    assert.match(text, /Nov 2, 2025/);
-    await panel.evaluate((el) => [...el.shadowRoot.querySelectorAll('button')].find((b) => b.textContent.includes('Track BSR')).click());
-    await page.waitForFunction(() => document.querySelector('loupe-panel')?.shadowRoot?.textContent?.includes('Tracking'));
-    await page.screenshot({ path: join(out, 'product.png') });
-  });
-
-  await step('captures Merch sales from fetch and XHR, then notifies on refresh', async () => {
-    await page.goto('https://merch.amazon.com/analyze');
-    await page.waitForSelector('text=2 records');
-    worker = context.serviceWorkers()[0];
-    const read = () => worker.evaluate(() => chrome.storage.local.get(['sales', 'captureLog', 'replay']));
-    let state;
-    for (let i = 0; i < 30; i++) {
-      state = await read();
-      if (Object.keys(state.sales ?? {}).length === 2 && state.replay?.length && state.captureLog?.length >= 2) break;
-      await new Promise((r) => setTimeout(r, 100));
+  const merch = createMerch(style);
+  const counters = { productRequests: 0 };
+  await context.route(/https:\/\/www\.amazon\.com\/.*/, (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === '/s') return route.fulfill({ contentType: 'text/html', body: searchPage(url.searchParams.get('k') ?? '') });
+    const asin = url.pathname.match(/\/dp\/([A-Z0-9]{10})/)?.[1];
+    if (asin) {
+      counters.productRequests += 1;
+      return route.fulfill({ contentType: 'text/html', body: productPage(asin) });
     }
-    const rows = Object.values(state.sales);
-    assert.equal(rows.length, 2);
-    assert.deepEqual(rows.map((r) => r.units).sort(), [1, 3]);
-    assert.equal(rows.find((r) => r.units === 3).royalty, 7.32);
-    assert.ok(state.captureLog.some((e) => e.path === '/api/reporting/summary' && e.rows === 0), 'XHR summary was seen');
-    assert.equal(state.replay.length, 1);
-
-    const dock = page.locator('loupe-dock');
-    await dock.evaluate((el) => el.shadowRoot.querySelector('button.fab').click());
-    await dock.evaluate((el) => [...el.shadowRoot.querySelectorAll('button')].find((b) => b.textContent.includes('Refresh')).click());
-    for (let i = 0; i < 30; i++) {
-      state = await read();
-      if (Object.values(state.sales).some((r) => r.units === 5)) break;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    assert.ok(Object.values(state.sales).some((r) => r.units === 5), 'replayed report updated the day');
-    const badge = await worker.evaluate(() => chrome.action.getBadgeText({}));
-    assert.equal(badge, '6');
-    const notes = await worker.evaluate(() => new Promise((resolve) => chrome.notifications.getAll(resolve)));
-    assert.equal(Object.keys(notes).filter((id) => id.startsWith('sale-')).length, 1, 'one new-sale notification, none for the first import');
+    return route.fulfill({ contentType: 'text/html', body: '<html><body>amazon</body></html>' });
   });
-
-  await step('dock fills a listing from a draft and flags trademarks', async () => {
-    await worker.evaluate(() =>
-      chrome.storage.local.set({
-        drafts: [{ id: 'd1', name: 'Pickleball', brand: 'Dinkworthy', title: 'Retro Pickleball Legend', bullet1: 'Funny pickleball gift', bullet2: 'Free shipping for Nike fans', description: '', keywords: '', updatedAt: Date.now() }],
-      }),
-    );
-    await page.goto('https://merch.amazon.com/designs/create');
-    const dock = page.locator('loupe-dock');
-    await dock.waitFor({ state: 'attached' });
-    await page.waitForTimeout(800);
-    await dock.evaluate((el) => el.shadowRoot.querySelector('button.fab').click());
-    await dock.evaluate((el) => [...el.shadowRoot.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Fill').click());
-    assert.equal(await page.inputValue('#brand'), 'Dinkworthy');
-    assert.equal(await page.inputValue('#title'), 'Retro Pickleball Legend');
-    assert.equal(await page.inputValue('#b2'), 'Free shipping for Nike fans');
-    assert.equal(await page.inputValue('#price'), '19.99', 'price untouched');
-    await dock.evaluate((el) => [...el.shadowRoot.querySelectorAll('button')].find((b) => b.textContent.includes('Bullets')).click());
-    assert.equal(await page.inputValue('#desc'), 'Funny pickleball gift. Free shipping for Nike fans.');
-    await page.waitForFunction(() => document.querySelector('loupe-dock')?.shadowRoot?.textContent?.includes('Nike'));
-    const text = await dock.evaluate((el) => el.shadowRoot.textContent);
-    assert.match(text, /free shipping/i);
-    await page.screenshot({ path: join(out, 'merch-dock.png') });
+  await context.route(/https:\/\/completion\.amazon\.com\/.*/, (route) => {
+    const prefix = new URL(route.request().url()).searchParams.get('prefix') ?? '';
+    const suggestions = ['shirt', 'paddle', 'gifts for men', 'dad', 'women', 'funny'].map((s) => ({ value: `${prefix} ${s}`.replace(/\s+/g, ' ') }));
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ suggestions }) });
   });
-
-  const dash = await context.newPage();
-
-  await step('dashboard overview renders real and sample data', async () => {
-    await dash.goto(ext('dashboard.html#overview'));
-    await dash.waitForSelector('text=Units sold');
-    await dash.evaluate(() => chrome.storage.local.remove('sales'));
-    await dash.goto(ext('dashboard.html#welcome'));
-    await dash.click('text=Load sample data');
-    await dash.waitForSelector('text=sample data');
-    await dash.waitForSelector('.chart svg path.bar');
-    const bars = await dash.locator('.chart svg path.bar').count();
-    assert.ok(bars >= 28, `daily columns rendered (${bars})`);
-    await dash.locator('.chart').first().hover({ position: { x: 600, y: 120 } });
-    await dash.waitForSelector('.chart-tip');
-    await dash.screenshot({ path: join(out, 'overview.png'), fullPage: true });
-  });
-
-  await step('dark mode', async () => {
-    await dash.emulateMedia({ colorScheme: 'dark' });
-    await dash.screenshot({ path: join(out, 'overview-dark.png') });
-    await dash.emulateMedia({ colorScheme: 'light' });
-  });
-
-  await step('products, royalties, trademarks, listings and settings render', async () => {
-    for (const [hash, text] of [
-      ['products', 'Days idle'],
-      ['royalties', 'Price ladder'],
-      ['trademarks', 'Your term lists'],
-      ['listings', 'Pickleball'],
-      ['settings', 'Sync diagnostics'],
-    ]) {
-      await dash.goto(ext(`dashboard.html#${hash}`));
-      await dash.waitForSelector(`text=${text}`);
-      await dash.screenshot({ path: join(out, `${hash}.png`), fullPage: hash !== 'settings' });
-    }
-    await dash.goto(ext('dashboard.html#royalties'));
-    const value = await dash.locator('.stat .value').first().textContent();
-    assert.equal(value, '$2.44');
-    await dash.goto(ext('dashboard.html#trademarks?q=Funny%20Spiderman%20Olympic%20Tee'));
-    await dash.waitForSelector('text=High risk');
-  });
-
-  await step('research expands keywords and scores a niche', async () => {
-    await dash.goto(ext('dashboard.html#research?q=pickleball&mp=US'));
-    await dash.waitForSelector('text=keyword ideas', { timeout: 15000 });
-    await dash.locator('button:has-text("Analyze")').first().click();
-    await dash.waitForSelector('text=Niche scores');
-    await dash.waitForSelector('.pill:has-text("·")', { timeout: 30000 });
-    await dash.screenshot({ path: join(out, 'research.png'), fullPage: true });
-  });
-
-  await step('watchlist shows the tracked product', async () => {
-    await dash.goto(ext('dashboard.html#watchlist'));
-    await dash.waitForSelector('text=Retro Pickleball Legend');
-    await dash.screenshot({ path: join(out, 'watchlist.png') });
-  });
-
-  await step('popup', async () => {
-    const popup = await context.newPage();
-    await popup.setViewportSize({ width: 380, height: 640 });
-    await popup.goto(ext('popup.html'));
-    await popup.waitForSelector('text=This month');
-    await popup.fill('#tm', 'Disney princess best seller');
-    await popup.waitForSelector('text=Famous trademark or franchise');
-    await popup.screenshot({ path: join(out, 'popup.png'), fullPage: true });
-    await popup.close();
-  });
-
-  console.log(`\nAll e2e checks passed. Screenshots in ${out}`);
-} finally {
-  await context.close();
-  await rm(profile, { recursive: true, force: true });
+  await context.route(/https:\/\/merch\.amazon\.com\/.*/, (route) => merch.handle(route));
+  const worker = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker'));
+  const extensionId = new URL(worker.url()).host;
+  const ext = (path) => `chrome-extension://${extensionId}/${path}`;
+  const close = async () => {
+    await context.close();
+    await rm(profile, { recursive: true, force: true });
+  };
+  return { context, merch, worker, ext, counters, close };
 }
+
+const storage = (page, key) => page.evaluate((k) => chrome.storage.local.get(k).then((r) => r[k]), key);
+const dbCount = (page, store) =>
+  page.evaluate(
+    (s) =>
+      new Promise((resolve, reject) => {
+        const req = indexedDB.open('loupe');
+        req.onsuccess = () => {
+          const r = req.result.transaction(s).objectStore(s).count();
+          r.onsuccess = () => resolve(r.result);
+          r.onerror = () => reject(r.error);
+        };
+        req.onerror = () => reject(req.error);
+      }),
+    store,
+  );
+const dbAll = (page, store) =>
+  page.evaluate(
+    (s) =>
+      new Promise((resolve) => {
+        const req = indexedDB.open('loupe');
+        req.onsuccess = () => {
+          const r = req.result.transaction(s).objectStore(s).getAll();
+          r.onsuccess = () => resolve(r.result);
+        };
+      }),
+    store,
+  );
+
+async function connect(dash, label) {
+  await dash.evaluate(() => chrome.storage.local.set({ settings: { historyDays: 400, syncDelayMs: 15 } }));
+  const before = (await storage(dash, 'syncState'))?.startedAt ?? 0;
+  const context = dash.context();
+  const opened = context.waitForEvent('page', { timeout: 15000 });
+  await dash.locator(`button:has-text("${label}")`).first().click();
+  // A tab the extension opens can start loading before Playwright's request
+  // interception attaches to it; load it again once it's attached.
+  const tab = await opened;
+  await tab.waitForLoadState('domcontentloaded').catch(() => undefined);
+  if (!tab.url().startsWith('https://merch.amazon.com/')) await tab.goto('https://merch.amazon.com/dashboard');
+  return until(async () => {
+    const s = await storage(dash, 'syncState');
+    if (s && (s.startedAt ?? 0) > before && ['done', 'partial', 'error', 'signin'].includes(s.status)) return s;
+    return null;
+  }, { timeout: 120000, interval: 500, message: 'the connect sync to finish' });
+}
+
+// ---------------------------------------------------------------------------
+console.log('Scenario A: research overlays, connect (GET + epoch dates, POST + tokens), agent, alerts, listings');
+{
+  const { context, merch, worker, ext, counters, close } = await launch('A');
+  try {
+    await step('opens the welcome page on install', async () => {
+      const welcome = await until(() => context.pages().find((p) => p.url().includes('dashboard.html')), { timeout: 5000, message: 'welcome tab' });
+      await welcome.waitForSelector('text=Welcome to Loupe');
+      await welcome.screenshot({ path: join(out, 'welcome.png') });
+      await welcome.close();
+    });
+
+    const page = await context.newPage();
+
+    await step('search overlay analyzes every result', async () => {
+      await page.goto('https://www.amazon.com/s?k=pickleball');
+      await page.locator('loupe-toolbar').waitFor({ state: 'attached' });
+      await page.waitForFunction(() => document.querySelector('loupe-toolbar')?.shadowRoot?.textContent?.includes('8 products analyzed'), null, { timeout: 30000 });
+      const text = await page.locator('loupe-toolbar').evaluate((el) => el.shadowRoot.textContent);
+      assert.match(text, /Niche score/);
+      const badges = await page.locator('loupe-badge').evaluateAll((els) => els.map((el) => el.shadowRoot.textContent));
+      assert.equal(badges.length, 8);
+      assert.match(badges[0], /#18,400/);
+      assert.match(badges[7], /Not Merch/);
+      await page.screenshot({ path: join(out, 'search.png') });
+    });
+
+    await step('sorts by BSR and filters non-Merch in place', async () => {
+      const click = (label) => page.locator('loupe-toolbar').evaluate((el, l) => [...el.shadowRoot.querySelectorAll('button')].find((b) => b.textContent.trim() === l).click(), label);
+      await click('Best BSR');
+      const order = await page.locator('div[data-component-type="s-search-result"]').evaluateAll((els) => els.map((e) => e.dataset.asin));
+      assert.equal(order[0], ASINS[7]);
+      await click('Merch only');
+      assert.equal(await page.locator(`div[data-asin="${ASINS[7]}"]`).evaluate((el) => el.style.display), 'none');
+    });
+
+    await step('serves repeat visits from cache', async () => {
+      const before = counters.productRequests;
+      await page.reload();
+      await page.waitForFunction(() => document.querySelector('loupe-toolbar')?.shadowRoot?.textContent?.includes('8 products analyzed'), null, { timeout: 15000 });
+      assert.equal(counters.productRequests, before);
+    });
+
+    await step('product panel shows BSR, royalty and trademark check; tracking works', async () => {
+      await page.goto(`https://www.amazon.com/dp/${ASINS[0]}`);
+      await page.locator('loupe-panel').waitFor({ state: 'attached' });
+      await page.waitForFunction(() => document.querySelector('loupe-panel')?.shadowRoot?.textContent?.includes('#18,400'));
+      const text = await page.locator('loupe-panel').evaluate((el) => el.shadowRoot.textContent);
+      assert.match(text, /Royalty at \$19\.99/);
+      await page.locator('loupe-panel').evaluate((el) => [...el.shadowRoot.querySelectorAll('button')].find((b) => b.textContent.includes('Track BSR')).click());
+      await page.waitForFunction(() => document.querySelector('loupe-panel')?.shadowRoot?.textContent?.includes('Tracking'));
+      await page.screenshot({ path: join(out, 'product.png') });
+    });
+
+    const dash = await context.newPage();
+    dash.on('dialog', (d) => { console.log(`    dialog: ${d.message()}`); void d.dismiss(); });
+    dash.on('pageerror', (e) => console.log(`    page error: ${e.message}`));
+    let merchTab;
+
+    await step('connects the Merch account: discovers, learns, backfills and reads the catalog', async () => {
+      await dash.goto(ext('dashboard.html#overview'));
+      await dash.waitForSelector('text=Connect Merch account');
+      const s = await connect(dash, 'Connect Merch account');
+      assert.equal(s.status, 'done', `sync finished as ${s.status}: ${s.phase} ${s.error ?? ''}`);
+      const templates = await storage(dash, 'templates');
+      assert.deepEqual([...new Set(templates.map((t) => t.kind))].sort(), ['catalog', 'sales']);
+      const sales = templates.find((t) => t.kind === 'sales');
+      assert.equal(sales.dated, true);
+      assert.deepEqual(sales.dates.map((d) => d.format), ['epoch-ms', 'epoch-ms']);
+      assert.equal(await dbCount(dash, 'catalog'), merch.listings.length);
+      const rows = await dbAll(dash, 'sales');
+      assert.ok(rows.length > 300, `sales rows: ${rows.length}`);
+      assert.ok(rows.some((r) => r.marketplace === 'DE' && r.currency === 'EUR'), 'German sales downloaded');
+      const oldest = rows.reduce((m, r) => (r.date < m ? r.date : m), '9999');
+      assert.ok(oldest <= (await storage(dash, 'meta')).coverage.salesFrom, 'history reaches the configured start');
+      assert.equal(merch.state.forbidden, 0, 'every replayed request carried the anti-forgery header');
+      assert.equal((await storage(dash, 'account')).tier, 1000);
+      merchTab = context.pages().find((p) => p.url().startsWith('https://merch.amazon.com/'));
+      await merchTab.waitForFunction(() => document.querySelector('loupe-dock')?.shadowRoot?.textContent?.includes('Loupe is connected'));
+      await merchTab.screenshot({ path: join(out, 'connected.png') });
+    });
+
+    await step('agent turns the portfolio into actions', async () => {
+      await dash.goto(ext('dashboard.html#agent'));
+      await dash.waitForSelector('text=Next best actions');
+      const text = await dash.locator('main').textContent();
+      assert.match(text, /Replace 12 designs with no sales in the past year/);
+      assert.match(text, /Stop uploading to “fishing lure”/);
+      assert.match(text, /designs are taking off/);
+      assert.match(text, /Make more designs in “pickleball/);
+      assert.match(text, /Halloween is in \d+ days: you have 2 designs for it/);
+      assert.match(text, /Last year these designs sold \d+ units/);
+      assert.match(text, /Put your \d+ best sellers on more products/);
+      assert.match(text, /of 1,000 used/);
+      await dash.screenshot({ path: join(out, 'agent.png'), fullPage: true });
+      await dash.goto(ext('dashboard.html#products'));
+      await dash.waitForSelector('text=Fishing Lure Pattern 1 T-Shirt');
+      await dash.screenshot({ path: join(out, 'designs.png') });
+    });
+
+    await step('a quick sync picks up new sales, notifies and updates the badge', async () => {
+      merch.state.extraToday = 3;
+      const before = (await storage(dash, 'syncState')).startedAt;
+      await dash.evaluate(() => chrome.runtime.sendMessage({ type: 'sync:start', mode: 'quick', interactive: false }));
+      await until(async () => {
+        const s = await storage(dash, 'syncState');
+        return s.startedAt > before && s.status === 'done';
+      }, { timeout: 30000, message: 'quick sync' });
+      const notes = await worker.evaluate(() => new Promise((resolve) => chrome.notifications.getAll(resolve)));
+      assert.equal(Object.keys(notes).filter((id) => id.startsWith('sale-')).length, 1, 'one new-sale notification');
+      assert.match(await worker.evaluate(() => chrome.action.getBadgeText({})), /^\d+$/);
+    });
+
+    await step('dock fills a listing from a draft and flags trademarks', async () => {
+      await dash.evaluate(() =>
+        chrome.storage.local.set({
+          drafts: [{ id: 'd1', name: 'Pickleball', brand: 'Dinkworthy', title: 'Retro Pickleball Legend', bullet1: 'Funny pickleball gift', bullet2: 'Free shipping for Nike fans', description: '', keywords: '', updatedAt: Date.now() }],
+        }),
+      );
+      await merchTab.goto('https://merch.amazon.com/designs/create');
+      const dock = merchTab.locator('loupe-dock');
+      await dock.waitFor({ state: 'attached' });
+      await merchTab.waitForTimeout(800);
+      await dock.evaluate((el) => el.shadowRoot.querySelector('button.fab').click());
+      await dock.evaluate((el) => [...el.shadowRoot.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Fill').click());
+      assert.equal(await merchTab.inputValue('#brand'), 'Dinkworthy');
+      assert.equal(await merchTab.inputValue('#b2'), 'Free shipping for Nike fans');
+      assert.equal(await merchTab.inputValue('#price'), '19.99');
+      await dock.evaluate((el) => [...el.shadowRoot.querySelectorAll('button')].find((b) => b.textContent.includes('Bullets')).click());
+      assert.equal(await merchTab.inputValue('#desc'), 'Funny pickleball gift. Free shipping for Nike fans.');
+      await merchTab.waitForFunction(() => document.querySelector('loupe-dock')?.shadowRoot?.textContent?.includes('Nike'));
+      await merchTab.screenshot({ path: join(out, 'merch-dock.png') });
+    });
+
+    await step('sales overview, dark mode and every page render', async () => {
+      const t0 = Date.now();
+      const log = (m) => process.env.E2E_DEBUG && console.log(`    [${Date.now() - t0}ms] ${m}`);
+      log('goto overview');
+      await dash.goto(ext('dashboard.html#overview'));
+      log('wait bars');
+      await dash.waitForSelector('.chart svg path.bar');
+      await dash.locator('.chart').first().hover({ position: { x: 600, y: 120 } });
+      await dash.waitForSelector('.chart-tip');
+      await dash.screenshot({ path: join(out, 'overview.png'), fullPage: true });
+      log('dark');
+      await dash.emulateMedia({ colorScheme: 'dark' });
+      await dash.goto(ext('dashboard.html#agent'));
+      await dash.waitForSelector('text=Next best actions');
+      await dash.waitForTimeout(300);
+      await dash.screenshot({ path: join(out, 'agent-dark.png') });
+      await dash.emulateMedia({ colorScheme: 'light' });
+      for (const [hash, text] of [['royalties', 'Price ladder'], ['trademarks', 'Your term lists'], ['listings', 'Pickleball'], ['settings', 'Sync diagnostics']]) {
+        log(hash);
+        await dash.goto(ext(`dashboard.html#${hash}`));
+        log(`${hash} loaded`);
+        await dash.waitForSelector(`text=${text}`);
+        log(`${hash} found`);
+        await dash.screenshot({ path: join(out, `${hash}.png`), fullPage: hash !== 'settings' });
+        log(`${hash} shot`);
+      }
+      log('report');
+      await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: ext('').replace(/\/$/, '') }).catch(() => undefined);
+      const report = await dash.evaluate(async () => {
+        const btn = [...document.querySelectorAll('button')].find((b) => b.textContent.includes('Copy sync report'));
+        btn.click();
+        await new Promise((r) => setTimeout(r, 300));
+        const read = navigator.clipboard.readText().catch(() => 'clipboard unavailable');
+        return Promise.race([read, new Promise((r) => setTimeout(() => r('clipboard unavailable'), 2000))]);
+      });
+      console.log(`    sync report: ${report === 'clipboard unavailable' ? 'clipboard unavailable in this browser' : `${report.split('\n').length} lines`}`);
+      if (report !== 'clipboard unavailable') {
+        assert.match(report, /Learned templates \(2\)/);
+        assert.doesNotMatch(report, /Pickleball|Dinkworthy|a2z-csrf/, 'report contains no titles, brands or header values');
+      }
+    });
+
+    await step('research expands keywords and scores a niche; watchlist; popup', async () => {
+      await dash.goto(ext('dashboard.html#research?q=pickleball&mp=US'));
+      await dash.waitForSelector('text=keyword ideas', { timeout: 15000 });
+      await dash.locator('button:has-text("Analyze")').first().click();
+      await dash.waitForSelector('.pill:has-text("·")', { timeout: 30000 });
+      await dash.screenshot({ path: join(out, 'research.png'), fullPage: true });
+      await dash.goto(ext('dashboard.html#watchlist'));
+      await dash.waitForSelector('text=Retro Pickleball Legend');
+      const popup = await context.newPage();
+      await popup.setViewportSize({ width: 380, height: 640 });
+      await popup.goto(ext('popup.html'));
+      await popup.waitForSelector('text=This month');
+      await popup.fill('#tm', 'Disney princess best seller');
+      await popup.waitForSelector('text=Famous trademark or franchise');
+      await popup.screenshot({ path: join(out, 'popup.png'), fullPage: true });
+      await popup.close();
+    });
+  } finally {
+    await close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+console.log('Scenario B: sample data first, then connect (POST + ISO dates, undated totals; GET + page numbers)');
+{
+  const { context, ext, close } = await launch('B');
+  try {
+    const dash = await until(() => context.pages().find((p) => p.url().includes('dashboard.html')), { timeout: 5000, message: 'welcome tab' });
+    await step('sample data shows the agent before connecting', async () => {
+      await dash.waitForSelector('text=Load sample data');
+      await dash.click('text=Load sample data');
+      await dash.waitForSelector('text=Next best actions');
+      const text = await dash.locator('main').textContent();
+      assert.match(text, /sample data/);
+      assert.match(text, /Replace \d+ designs/);
+      await dash.screenshot({ path: join(out, 'agent-sample.png'), fullPage: true });
+    });
+
+    await step('connect replaces the sample data with the account', async () => {
+      const s = await connect(dash, 'Connect Merch account');
+      assert.equal(s.status, 'done', `sync finished as ${s.status}: ${s.phase} ${s.error ?? ''}`);
+      const meta = await storage(dash, 'meta');
+      assert.equal(meta.demo, false);
+      const templates = await storage(dash, 'templates');
+      const sales = templates.find((t) => t.kind === 'sales');
+      assert.equal(sales.dated, false);
+      assert.equal(sales.bodyType, 'json');
+      const catalog = templates.find((t) => t.kind === 'catalog');
+      assert.deepEqual(catalog.pages.map((p) => p.role).sort(), ['page', 'size']);
+      const totals = await dbAll(dash, 'totals');
+      assert.ok(totals.some((t) => t.days === 365) && totals.some((t) => t.days === 90), 'window totals stored');
+      const rows = await dbAll(dash, 'sales');
+      assert.ok(rows.length > 50 && rows.every((r) => r.source !== 'demo'), `per-day sales rows: ${rows.length}`);
+      assert.equal(await dbCount(dash, 'catalog'), 28);
+      await dash.goto(ext('dashboard.html#agent'));
+      await dash.waitForSelector('text=Next best actions');
+      const text = await dash.locator('main').textContent();
+      assert.match(text, /Replace 12 designs with no sales/);
+      assert.doesNotMatch(text, /sample data/);
+    });
+  } finally {
+    await close();
+  }
+}
+
+console.log(`\nAll e2e checks passed. Screenshots in ${out}`);

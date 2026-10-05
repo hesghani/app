@@ -2,7 +2,8 @@ import { render, type ComponentChildren } from 'preact';
 import { useEffect } from 'preact/hooks';
 import * as fmt from '../shared/format';
 import { ToastProvider } from '../ui/components';
-import { Box, Chart, Coins, Eye, Logo, Pen, Search, Settings as SettingsIcon, Shield } from '../ui/icons';
+import { Box, Chart, Coins, Eye, Logo, Pen, Search, Settings as SettingsIcon, Shield, Wand } from '../ui/icons';
+import { Agent } from './views/agent';
 import { useData, useRoute } from './data';
 import { Listings } from './views/listings';
 import { Overview } from './views/overview';
@@ -15,8 +16,9 @@ import { Watchlist } from './views/watchlist';
 import { Welcome } from './views/welcome';
 
 const NAV: Array<[string, string, ComponentChildren]> = [
-  ['overview', 'Overview', <Chart size={17} />],
-  ['products', 'Products', <Box size={17} />],
+  ['agent', 'Agent', <Wand size={17} />],
+  ['overview', 'Sales', <Chart size={17} />],
+  ['products', 'Designs', <Box size={17} />],
   ['research', 'Research', <Search size={17} />],
   ['watchlist', 'Watchlist', <Eye size={17} />],
   ['trademarks', 'Trademarks', <Shield size={17} />],
@@ -28,7 +30,7 @@ const NAV: Array<[string, string, ComponentChildren]> = [
 function App() {
   const data = useData();
   const route = useRoute();
-  const page = route.page === 'welcome' ? 'welcome' : NAV.some(([id]) => id === route.page) ? route.page : 'overview';
+  const page = route.page === 'welcome' ? 'welcome' : NAV.some(([id]) => id === route.page) ? route.page : 'agent';
 
   useEffect(() => {
     const label = NAV.find(([id]) => id === page)?.[1] ?? 'Welcome';
@@ -51,7 +53,7 @@ function App() {
         {data && (
           <div class="side-foot">
             <span>
-              {data.meta.demo ? 'Showing sample data' : data.meta.lastCaptureAt ? `Last sync ${fmt.ago(data.meta.lastCaptureAt)}` : 'Not synced yet'}
+              {data.syncState.status === 'running' ? 'Syncing…' : data.meta.demo ? 'Showing sample data' : data.meta.lastCaptureAt ? `Last sync ${fmt.ago(data.meta.lastCaptureAt)}` : 'Not connected yet'}
             </span>
             <a href="https://merch.amazon.com/" target="_blank" rel="noopener">Open Merch on Demand ↗</a>
           </div>
@@ -60,6 +62,8 @@ function App() {
       <main class="main" id="main">
         {!data ? null : page === 'welcome' ? (
           <Welcome settings={data.settings} />
+        ) : page === 'agent' ? (
+          <Agent data={data} />
         ) : page === 'overview' ? (
           <Overview data={data} />
         ) : page === 'products' ? (

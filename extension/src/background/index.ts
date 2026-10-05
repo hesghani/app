@@ -1,14 +1,17 @@
-// Service worker: the single writer for sales data, plus notifications, the
-// toolbar badge, scheduled watchlist refreshes and context menus.
+// Service worker: the single writer for sales and catalog data, the sync
+// orchestrator, notifications, the toolbar badge, scheduled refreshes and
+// context menus.
 
+import { bump, clearStore, count, getAll, getMany, putMany, salesBetween, type Keyed } from '../shared/db';
 import { addDays, localDay, pacificDay } from '../shared/dates';
 import * as fmt from '../shared/format';
+import { rankTemplates, type Template } from '../shared/learn';
 import type { Message } from '../shared/messages';
 import { MARKETPLACES, merchSearchUrl } from '../shared/marketplaces';
 import { PRODUCT_TYPES } from '../shared/products';
-import { mergeSales } from '../shared/sales';
-import { get, getSettings, productKey, pruneProducts, saveProduct, set, allProducts } from '../shared/storage';
-import type { ProductData, ReplayTemplate, SaleRow } from '../shared/types';
+import { mergeSales, rowKey } from '../shared/sales';
+import { get, getSettings, productKey, pruneProducts, saveProduct, set, allProducts, update } from '../shared/storage';
+import type { AccountFacts, CaptureLogEntry, CatalogItem, ProductData, RangeTotal, SaleRow, SyncMode, SyncState } from '../shared/types';
 
 // ---------- Serialized writes ----------
 
@@ -19,22 +22,95 @@ function serial<T>(task: () => Promise<T>): Promise<T> {
   return next;
 }
 
-// ---------- Sales ----------
+// ---------- One-time move of sales from chrome.storage to IndexedDB ----------
 
-async function ingest(rows: SaleRow[]) {
+async function migrate() {
+  const meta = await get('meta');
+  if (meta.migratedToDb) return;
+  const legacy = await get('sales');
+  const rows = Object.values(legacy);
+  if (rows.length) await putMany('sales', rows.map((r) => ({ ...r, key: rowKey(r) })));
+  await chrome.storage.local.remove('sales');
+  await chrome.storage.local.remove('replay');
+  await set('meta', { ...meta, migratedToDb: true });
+  if (rows.length) await bump('sales');
+}
+
+// ---------- Sales, totals, catalog ----------
+
+/** Real data replaces all sample data the first time any of it arrives. */
+async function leaveDemo() {
+  const meta = await get('meta');
+  if (!meta.demo) return meta;
+  await Promise.all([clearStore('sales'), clearStore('catalog'), clearStore('totals')]);
+  const next = { ...meta, demo: false, knownMarkets: [] };
+  await set('meta', next);
+  await bump('sales', 'catalog', 'totals');
+  return next;
+}
+
+async function ingestSales(rows: SaleRow[]) {
   return serial(async () => {
-    const [store, settings, meta] = await Promise.all([get('sales'), getSettings(), get('meta')]);
+    const settings = await getSettings();
+    const meta = await leaveDemo();
     const now = Date.now();
     const today = localDay(now);
-    const recent = [today, addDays(today, -1), pacificDay(now)];
-    // Real data replaces the sample data the first time it arrives.
-    const base = meta.demo ? {} : store;
-    const result = mergeSales(base, rows, today, recent);
-    await set('sales', result.store);
-    await set('meta', { ...meta, demo: false, lastCaptureAt: now, lastCaptureRows: rows.length });
-    if (settings.notifications && result.newSales.length) notifySales(result.newSales.map((s) => ({ ...s })));
+    const recent = [today, addDays(today, -1), pacificDay(now), addDays(pacificDay(now), -1)];
+    const keys = rows.map((r) => rowKey(r));
+    const existing = await getMany('sales', keys);
+    const firstImport = (await count('sales')) === 0;
+    const prev: Record<string, SaleRow> = {};
+    for (const [k, v] of existing) prev[k] = v;
+    const result = mergeSales(prev, rows, today, recent, firstImport);
+    const changed = keys.filter((k) => result.store[k] !== prev[k]).map((k) => ({ ...result.store[k]!, key: k }));
+    await putMany('sales', changed as Array<Keyed<SaleRow>>);
+    // The first rows from a marketplace are history being backfilled, not new sales.
+    const known = new Set(meta.knownMarkets ?? []);
+    const fresh = result.newSales.filter((s) => known.has(s.row.marketplace));
+    for (const r of rows) known.add(r.marketplace);
+    await update('meta', (m) => ({ ...m, demo: false, lastCaptureAt: now, lastCaptureRows: rows.length, knownMarkets: Array.from(known) }));
+    if (changed.length) await bump('sales');
+    if (settings.notifications && fresh.length) notifySales(fresh);
     await refreshBadge();
     return { added: result.added, updated: result.updated, newSales: result.newSales.length };
+  });
+}
+
+async function ingestTotals(totals: RangeTotal[]) {
+  return serial(async () => {
+    await leaveDemo();
+    await putMany('totals', totals);
+    await bump('totals');
+  });
+}
+
+async function ingestCatalog(items: CatalogItem[]) {
+  return serial(async () => {
+    await leaveDemo();
+    const existing = await getMany('catalog', items.map((i) => i.key));
+    const merged = items.map((i) => {
+      const prev = existing.get(i.key);
+      return prev ? { ...prev, ...i, createdAt: i.createdAt ?? prev.createdAt, image: i.image ?? prev.image, designId: i.designId ?? prev.designId } : i;
+    });
+    await putMany('catalog', merged);
+    await bump('catalog');
+  });
+}
+
+/** After a complete catalog read, live listings that weren't returned are no longer live. */
+async function catalogComplete(startedAt: number) {
+  return serial(async () => {
+    const stale = (await getAll('catalog')).filter((i) => i.seenAt < startedAt && i.status === 'live');
+    if (!stale.length) return;
+    await putMany('catalog', stale.map((i) => ({ ...i, status: 'removed' as const, rawStatus: 'not listed' })));
+    await bump('catalog');
+  });
+}
+
+async function mergeAccount(account: AccountFacts) {
+  return serial(async () => {
+    const prev = await get('account');
+    await set('account', { tier: account.tier ?? prev?.tier, facts: { ...(prev?.facts ?? {}), ...account.facts }, seenAt: account.seenAt });
   });
 }
 
@@ -62,49 +138,124 @@ async function refreshBadge() {
     await chrome.action.setBadgeText({ text: '' });
     return;
   }
-  const sales = await get('sales');
   // Merch reports days in US Pacific time.
   const today = pacificDay(Date.now());
-  let units = 0;
-  for (const row of Object.values(sales)) if (row.date === today) units += row.units;
+  const units = (await salesBetween(today, today)).reduce((n, r) => n + r.units, 0);
   await chrome.action.setBadgeBackgroundColor({ color: '#5546e8' });
   await chrome.action.setBadgeText({ text: units > 0 ? (units > 999 ? '999+' : String(units)) : '' });
   await chrome.action.setTitle({ title: units > 0 ? `Loupe · ${units} sold today` : 'Loupe for Merch on Demand' });
 }
 
-// ---------- Capture log and replay templates ----------
+// ---------- Templates and the capture log ----------
 
-async function logCapture(entry: Message & { type: 'capture:log' }) {
+async function saveTemplate(template: Template, tabId?: number) {
+  const firstSales = await serial(async () => {
+    const list = await get('templates');
+    const hadSales = list.some((t) => t.kind === 'sales');
+    const next = rankTemplates([template, ...list.filter((t) => t.id !== template.id)]);
+    // Keep the best few of each kind.
+    const keep = [...next.filter((t) => t.kind === 'sales').slice(0, 6), ...next.filter((t) => t.kind === 'catalog').slice(0, 6)];
+    await set('templates', keep);
+    return !hadSales && template.kind === 'sales';
+  });
+  // The first time Loupe learns the sales report, download the history right away.
+  if (firstSales && tabId !== undefined) {
+    const s = await get('syncState');
+    if (s.status !== 'running') await startSync('full', false, tabId);
+  }
+}
+
+async function logCapture(entry: CaptureLogEntry) {
   return serial(async () => {
     const log = await get('captureLog');
-    const next = [entry.entry, ...log.filter((e) => e.path !== entry.entry.path)].slice(0, 40);
-    await set('captureLog', next);
+    const id = entry.request ?? entry.path;
+    await set('captureLog', [entry, ...log.filter((e) => (e.request ?? e.path) !== id)].slice(0, 60));
   });
 }
 
-function templateKey(url: string): string {
-  const u = new URL(url);
-  return `${u.pathname}?${Array.from(u.searchParams.keys()).sort().join('&')}`;
+// ---------- Sync orchestration ----------
+
+const MERCH_HOME = 'https://merch.amazon.com/dashboard';
+
+async function setSync(patch: Partial<SyncState>) {
+  await update('syncState', (s) => ({ ...s, ...patch }));
 }
 
-async function saveTemplate(template: ReplayTemplate) {
-  return serial(async () => {
-    const list = await get('replay');
-    const key = templateKey(template.url);
-    await set('replay', [template, ...list.filter((t) => templateKey(t.url) !== key)].slice(0, 6));
-  });
+async function startSync(mode: SyncMode, interactive: boolean, preferTab?: number): Promise<Record<string, unknown>> {
+  const current = await get('syncState');
+  if (current.status === 'running' && Date.now() - (current.startedAt ?? 0) < 20 * 60_000) {
+    if (interactive && current.tabId !== undefined) await chrome.tabs.update(current.tabId, { active: true }).catch(() => undefined);
+    return { running: true };
+  }
+  const [templates, settings] = await Promise.all([get('templates'), getSettings()]);
+  const connected = templates.some((t) => t.kind === 'sales') || templates.some((t) => t.kind === 'catalog');
+  if (!connected && !interactive && preferTab === undefined) return { needsConnect: true };
+  const effective: SyncMode = connected ? mode : 'connect';
+
+  let tabId = preferTab;
+  let opened = false;
+  if (tabId === undefined && effective !== 'connect') {
+    const tabs = await chrome.tabs.query({ url: 'https://merch.amazon.com/*' });
+    tabId = tabs.find((t) => t.id !== undefined && t.status === 'complete' && !t.discarded)?.id;
+  }
+  if (tabId !== undefined) {
+    await set('syncState', { status: 'running', mode: effective, phase: 'Starting…', tabId, openedTab: false, startedAt: Date.now(), visited: [] });
+    const ok = await chrome.tabs.sendMessage(tabId, { type: 'sync:run', mode: effective } satisfies Message).then(() => true, () => false);
+    if (ok) return { started: true, tabId };
+  }
+  if (!interactive && !settings.backgroundTabSync) {
+    await setSync({ status: 'idle', phase: 'Open Merch on Demand to sync.' });
+    return { needsTab: true };
+  }
+  const tab = await chrome.tabs.create({ url: MERCH_HOME, active: interactive });
+  opened = true;
+  await set('syncState', { status: 'running', mode: effective, phase: 'Opening Merch on Demand…', tabId: tab.id, openedTab: opened, startedAt: Date.now(), visited: [] });
+  return { started: true, tabId: tab.id, opened };
 }
 
-async function merchTabs(): Promise<chrome.tabs.Tab[]> {
-  return chrome.tabs.query({ url: 'https://merch.amazon.com/*' });
+async function finishSync() {
+  const s = await get('syncState');
+  if (s.status === 'done' || s.status === 'partial') await update('meta', (m) => ({ ...m, lastCaptureAt: Date.now() }));
+  await refreshBadge();
+  if (s.openedTab && s.tabId !== undefined && s.mode !== 'connect' && s.status !== 'signin') {
+    const tab = await chrome.tabs.get(s.tabId).catch(() => null);
+    if (tab && !tab.active) setTimeout(() => void chrome.tabs.remove(s.tabId!).catch(() => undefined), 1500);
+  }
 }
 
-async function refreshMerchTabs(): Promise<number> {
-  const tabs = await merchTabs();
-  await Promise.all(
-    tabs.map((tab) => (tab.id ? chrome.tabs.sendMessage(tab.id, { type: 'merch:replay' } satisfies Message).catch(() => undefined) : undefined)),
-  );
-  return tabs.length;
+chrome.tabs.onUpdated.addListener(async (tabId, change) => {
+  if (!change.url) return;
+  const s = await get('syncState');
+  if (s.status !== 'running' || s.tabId !== tabId) return;
+  if (/\/ap\/(?:signin|mfa|cvf)|signin/i.test(change.url)) {
+    await setSync({ status: 'signin', phase: 'Sign in to Merch on Demand in the Loupe tab, then sync again.', finishedAt: Date.now() });
+    if (s.mode === 'connect' || s.openedTab) await chrome.tabs.update(tabId, { active: true }).catch(() => undefined);
+    else {
+      chrome.notifications.create('signin', {
+        type: 'basic', iconUrl: 'icons/icon128.png', title: 'Loupe needs you to sign in',
+        message: 'Merch on Demand signed you out. Sign in and Loupe will keep syncing.', priority: 1,
+      });
+    }
+  }
+});
+
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  const s = await get('syncState');
+  if (s.status === 'running' && s.tabId === tabId) {
+    await setSync({ status: 'error', phase: 'The sync tab was closed before Loupe finished.', finishedAt: Date.now() });
+  }
+});
+
+async function autoSync() {
+  const [settings, meta, s] = await Promise.all([getSettings(), get('meta'), get('syncState')]);
+  if (s.status === 'running' && Date.now() - (s.startedAt ?? 0) > 20 * 60_000) {
+    await setSync({ status: 'error', phase: 'The sync took too long and was stopped.', finishedAt: Date.now() });
+  }
+  if (!settings.autoSync) return;
+  // Signed out: don't keep opening Merch every half hour. Try again in a few hours.
+  if (s.status === 'signin' && Date.now() - (s.finishedAt ?? 0) < 6 * 3600_000) return;
+  const catalogStale = Date.now() - (meta.coverage?.catalogAt ?? 0) > 24 * 3600_000;
+  await startSync(catalogStale ? 'full' : 'quick', false);
 }
 
 // ---------- Watchlist refresh through the offscreen document ----------
@@ -151,8 +302,7 @@ async function refreshWatchlist(keys?: string[]) {
     }
     await new Promise((r) => setTimeout(r, 1500 + Math.random() * 2000));
   }
-  const meta = await get('meta');
-  await set('meta', { ...meta, lastWatchRefresh: Date.now() });
+  await update('meta', (m) => ({ ...m, lastWatchRefresh: Date.now() }));
   return { refreshed, failed };
 }
 
@@ -163,16 +313,13 @@ async function scheduleAlarms() {
   await chrome.alarms.create('watchlist', { periodInMinutes: 60, delayInMinutes: 2 });
   await chrome.alarms.create('maintenance', { periodInMinutes: 24 * 60, delayInMinutes: 10 });
   await chrome.alarms.create('badge', { periodInMinutes: 30 });
-  if (settings.liveRefresh) {
-    await chrome.alarms.create('live', { periodInMinutes: Math.max(5, settings.liveRefreshMinutes) });
-  } else {
-    await chrome.alarms.clear('live');
-  }
+  await chrome.alarms.create('autosync', { periodInMinutes: Math.max(10, settings.syncMinutes), delayInMinutes: 1 });
+  await chrome.alarms.clear('live');
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'watchlist') void refreshWatchlist();
-  else if (alarm.name === 'live') void refreshMerchTabs();
+  else if (alarm.name === 'autosync') void autoSync();
   else if (alarm.name === 'badge') void refreshBadge();
   else if (alarm.name === 'maintenance') void pruneProducts(30);
 });
@@ -217,12 +364,13 @@ async function openDashboard(hash = '') {
 
 chrome.notifications.onClicked.addListener((id) => {
   if (id.startsWith('sale-')) void openDashboard('overview');
+  if (id === 'signin') void chrome.tabs.create({ url: MERCH_HOME });
   chrome.notifications.clear(id);
 });
 
 // ---------- Messages ----------
 
-chrome.runtime.onMessage.addListener((message: Message & { target?: string }, _sender, respond) => {
+chrome.runtime.onMessage.addListener((message: Message & { target?: string }, sender, respond) => {
   if (message.target === 'offscreen') return false;
   const reply = (p: Promise<unknown>) => {
     p.then(respond, (error: Error) => respond({ error: error.message }));
@@ -230,10 +378,22 @@ chrome.runtime.onMessage.addListener((message: Message & { target?: string }, _s
   };
   switch (message.type) {
     case 'open-dashboard': return reply(openDashboard(message.hash));
-    case 'sales:ingest': return reply(ingest(message.rows));
-    case 'capture:log': return reply(logCapture(message));
-    case 'replay:save': return reply(saveTemplate(message.template));
-    case 'merch:refresh-all': return reply(refreshMerchTabs().then((tabs) => ({ tabs })));
+    case 'sales:ingest': return reply(ingestSales(message.rows));
+    case 'totals:ingest': return reply(ingestTotals(message.totals));
+    case 'catalog:ingest': return reply(ingestCatalog(message.items));
+    case 'catalog:complete': return reply(catalogComplete(message.startedAt));
+    case 'account:merge': return reply(mergeAccount(message.account));
+    case 'template:save': return reply(saveTemplate(message.template, sender.tab?.id));
+    case 'capture:log': return reply(logCapture(message.entry));
+    case 'sync:start': return reply(startSync(message.mode, message.interactive));
+    case 'sync:whoami':
+      return reply(
+        get('syncState').then((s) => ({
+          run: s.status === 'running' && s.tabId !== undefined && s.tabId === sender.tab?.id && sender.frameId === 0,
+          mode: s.mode,
+        })),
+      );
+    case 'sync:done': return reply(finishSync());
     case 'watchlist:refresh': return reply(refreshWatchlist(message.keys));
     case 'settings:changed': return reply(Promise.all([scheduleAlarms(), refreshBadge()]));
     case 'badge:refresh': return reply(refreshBadge());
@@ -244,6 +404,7 @@ chrome.runtime.onMessage.addListener((message: Message & { target?: string }, _s
 // ---------- Lifecycle ----------
 
 chrome.runtime.onInstalled.addListener(async (details) => {
+  await migrate();
   const meta = await get('meta');
   if (!meta.installedAt) await set('meta', { ...meta, installedAt: Date.now() });
   createMenus();
@@ -253,6 +414,5 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  void scheduleAlarms();
-  void refreshBadge();
+  void migrate().then(() => Promise.all([scheduleAlarms(), refreshBadge()]));
 });

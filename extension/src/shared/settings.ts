@@ -22,6 +22,17 @@ export interface Settings {
   searchTemplates: Partial<Record<MarketplaceId, string>>;
 
   // Merch on Demand
+  /** Sync automatically every `syncMinutes`. */
+  autoSync: boolean;
+  syncMinutes: number;
+  /** Open Merch in a background tab for auto-sync when no Merch tab is open. */
+  backgroundTabSync: boolean;
+  /** Days of daily sales history to download on connect. */
+  historyDays: number;
+  /** Average pause between sync requests, in ms. */
+  syncDelayMs: number;
+  /** Your Merch tier (live design limit); detected when Merch reports it. */
+  tier: number | null;
   notifications: boolean;
   badge: boolean;
   liveRefresh: boolean;
@@ -53,6 +64,12 @@ export const DEFAULT_SETTINGS: Settings = {
   suggestionAlias: 'aps',
   searchTemplates: {},
 
+  autoSync: true,
+  syncMinutes: 30,
+  backgroundTabSync: true,
+  historyDays: 400,
+  syncDelayMs: 450,
+  tier: null,
   notifications: true,
   badge: true,
   liveRefresh: false,
