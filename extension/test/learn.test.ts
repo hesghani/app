@@ -238,3 +238,48 @@ describe('telling the real thing from a widget', () => {
     expect(isSafeToReplay('POST', 'https://merch.amazon.com/graphql', '{"query":"mutation Delete { deleteDesign(id: 1) }"}')).toBe(false);
   });
 });
+
+describe('reports of totals for a date range (no date on each row)', () => {
+  const from = zonedToEpoch(2026, 9, 6);
+  const to = zonedToEpoch(2026, 10, 5, 23, 59, 59, 999);
+  const capture = cap({
+    url: `https://merch.amazon.com/api/reporting/purchases/report?marketplaceId=ATVPDKIKX0DER&fromDate=${from}&toDate=${to}`,
+    payload: [
+      { asin: 'B0AAAAAAAA', productType: 'STANDARD_TSHIRT', unitsSold: 41, unitsCancelled: 1, unitsReturned: 0, royalty: { value: 100.04, unit: 'USD' } },
+      { asin: 'B0BBBBBBBB', productType: 'HOODIE', unitsSold: 3, unitsCancelled: 0, unitsReturned: 0, royalty: { value: 21.3, unit: 'USD' } },
+    ],
+  });
+  const learned = learn(capture);
+
+  it('learns them as a sales template without storing a month of sales as one day', () => {
+    expect(learned.kind).toBe('sales');
+    expect(learned.rows).toEqual([]);
+    expect(learned.totals).toBe(2);
+    expect(learned.template?.rows).toBe(2);
+    expect(learned.template?.dated).toBe(false);
+    expect(isStrongSales(learned.template)).toBe(true);
+  });
+
+  it('asked for one day, the same report gives daily rows', () => {
+    const t = learned.template!;
+    const day = buildRequest(t, { from: '2026-10-04', to: '2026-10-04' });
+    const daily = learn(cap({ url: day.url, payload: capture.payload }));
+    expect(daily.rows.map((r) => [r.date, r.asin, r.units, r.currency])).toEqual([
+      ['2026-10-04', 'B0AAAAAAAA', 41, 'USD'],
+      ['2026-10-04', 'B0BBBBBBBB', 3, 'USD'],
+    ]);
+  });
+
+  it('reads name/value pair rows and ASINs under unfamiliar keys', () => {
+    const rows = normalizeSales(
+      {
+        results: [
+          { dimensions: [{ name: 'parentAsin', value: 'B0CCCCCCCC' }, { name: 'marketplace', value: 'ATVPDKIKX0DER' }], metrics: [{ name: 'netUnits', value: 5 }, { name: 'royaltyAmount', value: 12.2 }] },
+        ],
+      },
+      'https://merch.amazon.com/x',
+      { date: '2026-10-04', dateSource: 'url' },
+    ).rows;
+    expect(rows.map((r) => [r.asin, r.marketplace, r.units, r.royalty])).toEqual([['B0CCCCCCCC', 'US', 5, 12.2]]);
+  });
+});

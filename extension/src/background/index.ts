@@ -5,7 +5,7 @@
 import { bump, clearStore, count, deleteMany, getAll, getMany, putMany, salesBetween, type Keyed } from '../shared/db';
 import { addDays, localDay, pacificDay } from '../shared/dates';
 import * as fmt from '../shared/format';
-import { rankTemplates, type Template } from '../shared/learn';
+import { isStrongSales, rankTemplates, type Template } from '../shared/learn';
 import type { Message } from '../shared/messages';
 import { MARKETPLACES, merchSearchUrl } from '../shared/marketplaces';
 import { PRODUCT_TYPES } from '../shared/products';
@@ -166,14 +166,14 @@ async function refreshBadge() {
 async function saveTemplate(template: Template, tabId?: number) {
   const firstSales = await serial(async () => {
     const list = await get('templates');
-    const hadSales = list.some((t) => t.kind === 'sales');
+    const hadSales = list.some((t) => isStrongSales(t));
     const next = rankTemplates([template, ...list.filter((t) => t.id !== template.id)]);
     // Keep the best few of each kind.
     const keep = [...next.filter((t) => t.kind === 'sales').slice(0, 6), ...next.filter((t) => t.kind === 'catalog').slice(0, 6)];
     await set('templates', keep);
-    return !hadSales && template.kind === 'sales';
+    return !hadSales && isStrongSales(template);
   });
-  // The first time Loupe learns the sales report, download the history right away.
+  // The first time Loupe learns a sales report that returns sales, download the history right away.
   if (firstSales && tabId !== undefined && !syncActive()) await startSync('full', false, tabId);
 }
 

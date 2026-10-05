@@ -324,7 +324,10 @@ export function templateId(method: string, url: string, body?: string): string {
 
 export interface Learned {
   kind: 'sales' | 'catalog' | 'none';
+  /** Daily sales rows, safe to store as they are. */
   rows: SaleRow[];
+  /** Product rows in a report of totals for a multi-day range (no per-row dates). Not stored as daily rows. */
+  totals: number;
   dated: boolean;
   items: CatalogItem[];
   account: AccountFacts | null;
@@ -375,17 +378,33 @@ function isSalesCandidate(c: Capture, dates: DateSlot[]): boolean {
 }
 
 export function learn(c: Capture): Learned {
-  const { rows, dated } = normalizeSales(c.payload, c.url, requestContext(c));
-  const items = rows.length ? [] : normalizeCatalog(c.payload, c.at);
+  const ctx = requestContext(c);
+  const { rows, dated } = normalizeSales(c.payload, c.url, ctx);
+  let bodyType: Template['bodyType'] = 'none';
+  let list: Leaf[] = [];
+  let dates: DateSlot[] = [];
+  try {
+    bodyType = bodyTypeOf(c.headers, c.body);
+    list = leaves(c.url, c.body, bodyType);
+    dates = detectDates(list);
+  } catch {
+    /* malformed URL or body */
+  }
+  // Most sales reports are totals per product for the requested range, with
+  // no date on each row. They're the template for range totals and, asked
+  // one day at a time, for daily rows.
+  let totals = 0;
+  const range = windowOf(dates);
+  if (!rows.length && range && range.from !== range.to) {
+    totals = normalizeSales(c.payload, c.url, { ...ctx, date: range.to, dateSource: 'url' }).rows.length;
+  }
+  const items = rows.length || totals ? [] : normalizeCatalog(c.payload, c.at);
   const account = accountFacts(c.payload, c.at);
-  let kind: Learned['kind'] = rows.length ? 'sales' : items.length ? 'catalog' : 'none';
+  let kind: Learned['kind'] = rows.length || totals ? 'sales' : items.length ? 'catalog' : 'none';
   let template: Template | null = null;
   if (c.status < 400 && isSafeToReplay(c.method, c.url, c.body)) {
-    const bodyType = bodyTypeOf(c.headers, c.body);
-    const list = leaves(c.url, c.body, bodyType);
-    const dates = detectDates(list);
     if (kind === 'none' && isSalesCandidate(c, dates)) kind = 'sales';
-    if (kind === 'none') return { kind, rows, dated, items, account, template };
+    if (kind === 'none') return { kind, rows, totals, dated, items, account, template };
     const { markets, all } = detectMarkets(list);
     const token = findKey(c.payload, TOKEN_RESPONSE_KEYS);
     template = {
@@ -400,14 +419,14 @@ export function learn(c: Capture): Learned {
       markets,
       pages: detectPages(list),
       allMarkets: all,
-      dated,
-      window: windowOf(dates),
+      dated: rows.length > 0 && dated,
+      window: range,
       tokenKey: token && typeof token.value === 'string' ? token.key : null,
-      rows: kind === 'sales' ? rows.length : items.length,
+      rows: kind === 'sales' ? rows.length || totals : items.length,
       capturedAt: c.at,
     };
   }
-  return { kind, rows, dated, items, account, template };
+  return { kind, rows, totals, dated, items, account, template };
 }
 
 /** Better templates first: proven rows, dated rows, a date range or paging, then the most recent. */

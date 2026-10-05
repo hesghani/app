@@ -222,8 +222,10 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
       xhr.responseType = 'json';
       xhr.onload = () => { document.getElementById('out').textContent = xhr.response.records.length + ' records'; };
       xhr.send();` : `
+      // The last 7 days, as totals per product: rows carry no dates (like the account that stalled).
       const day = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
-      fetch('/api/sales/report', { method: 'POST', headers: { 'content-type': 'application/json', 'anti-csrftoken-a2z': TOKEN }, body: JSON.stringify({ startDate: day, endDate: day, marketplaces: ['US'], groupBy: 'ASIN' }) })
+      const start = new Date(Date.parse(day + 'T12:00:00Z') - 6 * 86400000).toISOString().slice(0, 10);
+      fetch('/api/sales/report', { method: 'POST', headers: { 'content-type': 'application/json', 'anti-csrftoken-a2z': TOKEN }, body: JSON.stringify({ startDate: start, endDate: day, marketplaces: ['US'], groupBy: 'ASIN' }) })
         .then((r) => r.json()).then((j) => { document.getElementById('out').textContent = j.report.rows.length + ' products'; });`),
     '/manage/products': () => shell('Manage', '<h1>Products</h1><div id="out">Loading…</div>', style === 'A' ? `
       fetch('/api/products/search', { method: 'POST', headers: { 'content-type': 'application/json', 'anti-csrftoken-a2z': TOKEN }, body: JSON.stringify({ pageSize: 8, filters: { status: ['LIVE', 'REJECTED'] } }) })

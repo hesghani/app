@@ -78,6 +78,7 @@ interface Run {
   debug: SyncDebug;
   scanned: Set<string>;
   refetched: Set<string>;
+  shapesLogged: number;
   settings: Settings;
 }
 
@@ -275,14 +276,14 @@ async function exec(run: Run, wires: Wire[], opts: { concurrency?: number; timeo
   return out;
 }
 
-async function ingest(c: Capture, saveTemplate = true): Promise<{ rows: number; items: number; template: Template | null }> {
+async function ingest(c: Capture, saveTemplate = true): Promise<{ rows: number; items: number; totals: number; template: Template | null }> {
   const l = learn(c);
   const h = hooks!;
   if (l.account) await h.mergeAccount(l.account);
   if (l.rows.length) await h.ingestSales(l.rows.map((r) => ({ ...r, source: 'capture' as const })));
   if (l.items.length) await h.ingestCatalog(l.items);
   if (saveTemplate && l.template) await h.saveTemplate(l.template);
-  return { rows: l.rows.length, items: l.items.length, template: l.template };
+  return { rows: l.rows.length, items: l.items.length, totals: l.totals, template: l.template };
 }
 
 async function templates(): Promise<{ sales: Template | null; catalog: Template | null }> {
@@ -353,6 +354,11 @@ function probesForPath(path: string, today: string): Wire[] {
   return [];
 }
 
+/** One line describing a response's structure (field names and value kinds only), for the sync log. */
+function shapeLine(payload: unknown): string {
+  return describeShape(payload, 14).join(' · ').slice(0, 600);
+}
+
 async function recordProbes(run: Run, done: Done[], label: string): Promise<{ sales: number; catalog: number }> {
   let sales = 0;
   let catalog = 0;
@@ -365,10 +371,16 @@ async function recordProbes(run: Run, done: Done[], label: string): Promise<{ sa
       const r = await ingest(d.capture);
       rows = r.rows;
       items = r.items;
-      kind = r.template ? `${r.template.kind}${r.template.rows ? '' : ' (empty)'}` : rows ? 'sales (no template)' : items ? 'catalog (no template)' : 'none';
-      if (r.template?.kind === 'sales') sales += 1;
-      if (r.template?.kind === 'catalog') catalog += 1;
+      const t = r.template;
+      kind = t ? `${t.kind}${t.rows ? '' : ' (empty)'}${t.kind === 'sales' && t.rows && !t.dated ? ' (range totals)' : ''}` : rows ? 'sales (no template)' : items ? 'catalog (no template)' : 'none';
+      if (t?.kind === 'sales' && t.rows > 0) sales += 1;
+      if (t?.kind === 'catalog') catalog += 1;
       keys = describeShape(d.capture.payload, 14);
+      // A sales report Loupe can't read yet: put its structure in the log.
+      if (t?.kind === 'sales' && !t.rows && run.shapesLogged < 4) {
+        run.shapesLogged += 1;
+        await detail(run, `unreadable report ${new URL(d.wire.url).pathname}: ${shapeLine(d.capture.payload)}`);
+      }
     }
     run.debug.probes.push({ request: `${label} ${describeRequest(d.wire.method, d.wire.url, d.wire.body)}`, status: d.res.status, kind, rows, items, ms: d.res.ms, keys });
   }
@@ -498,11 +510,11 @@ async function waitForCaptures(run: Run, need: () => Promise<{ sales: boolean; c
 // ---------- sales ----------
 
 /** Runs one sales request and follows its pages. */
-async function salesRange(run: Run, t: Template, opts: { from?: string; to?: string; marketplace?: MarketplaceId }): Promise<Capture[]> {
+async function salesRange(run: Run, t: Template, opts: { from?: string; to?: string; marketplace?: MarketplaceId }, split = true): Promise<Capture[]> {
   const [first] = await exec(run, [wireOf(t, opts)], { strictAuth: true });
   if (!first?.capture) {
-    // Some reports reject long ranges: retry a week at a time.
-    if (opts.from && opts.to && opts.from !== opts.to && first && first.res.status >= 400 && first.res.status !== 401) {
+    // Some reports reject long ranges: retry a week at a time (daily rows only; totals must stay whole).
+    if (split && t.dated && opts.from && opts.to && opts.from !== opts.to && first && first.res.status >= 400 && first.res.status !== 401) {
       const weeks = chunks(opts.from, opts.to, 7);
       if (weeks.length < 2) return [];
       const done = await exec(run, weeks.map((w) => wireOf(t, { ...opts, from: w.from, to: w.to })), { strictAuth: true });
@@ -606,7 +618,9 @@ async function downloadSales(run: Run, t: Template): Promise<number> {
     const activeMarkets: Array<MarketplaceId | undefined> = [];
     await pool(markets, 4, async (mp) => {
       let found = 0;
-      for (const c of await salesRange(run, t, { from: addDays(today, -364), to: today, marketplace: mp })) found += await ingestTotals(c, 365, today);
+      for (const c of await salesRange(run, t, { from: addDays(today, -364), to: today, marketplace: mp }, false)) found += await ingestTotals(c, 365, today);
+      // Merch may cap the range: 90 days still tells whether this marketplace sells.
+      if (!found) for (const c of await salesRange(run, t, { from: addDays(today, -89), to: today, marketplace: mp }, false)) found += await ingestTotals(c, 90, today);
       if (found > 0) activeMarkets.push(mp);
     });
     const plan = activeMarkets.flatMap((mp) => [
@@ -615,7 +629,7 @@ async function downloadSales(run: Run, t: Template): Promise<number> {
     ]);
     let done = 0;
     await pool(plan, 4, async (step) => {
-      for (const c of await salesRange(run, t, { from: step.from, to: step.to, marketplace: step.mp })) {
+      for (const c of await salesRange(run, t, { from: step.from, to: step.to, marketplace: step.mp }, false)) {
         if (step.window) await ingestTotals(c, step.window, today);
         else rows += (await ingest(c, false)).rows;
       }
@@ -724,8 +738,12 @@ async function verifySales(run: Run, t: Template): Promise<Template> {
   if (!d?.capture) return t;
   // Learn again from the fuller response: it shows whether rows carry their own dates.
   const r = await ingest(d.capture, false);
-  await detail(run, `checked the empty sales report with 30 days: ${r.rows} rows`);
-  if (r.rows > 0 && r.template?.kind === 'sales') {
+  await detail(run, `checked the empty sales report with 30 days: ${r.rows ? `${r.rows} daily rows` : r.totals ? `${r.totals} products with range totals` : '0 rows'}`);
+  if (!r.rows && !r.totals && run.shapesLogged < 4) {
+    run.shapesLogged += 1;
+    await detail(run, `unreadable report ${new URL(d.wire.url).pathname}: ${shapeLine(d.capture.payload)}`);
+  }
+  if (r.template?.kind === 'sales' && r.template.rows > 0) {
     const verified = { ...r.template, id: t.id, headers: t.headers };
     await hooks!.saveTemplate(verified);
     return verified;
@@ -755,7 +773,7 @@ export async function startSync(
   }
   const run: Run = {
     id: ++runCounter, mode, interactive, tabId: tabId ?? -1, ownTab, stop: false, requests: 0, errors: 0, signinHits: 0, okHits: 0,
-    debug: { at: Date.now(), probes: [], discovered: [], resources: [], pages: [] }, scanned: new Set(), refetched: new Set(), settings,
+    debug: { at: Date.now(), probes: [], discovered: [], resources: [], pages: [] }, scanned: new Set(), refetched: new Set(), shapesLogged: 0, settings,
   };
   active = run;
   await set('syncState', { status: 'running', mode, phase: 'Starting…', startedAt: Date.now(), updatedAt: Date.now(), tabId, openedTab: ownTab, log: [], restarts });
@@ -872,20 +890,6 @@ async function execute(run: Run) {
         await detail(run, `${path}: ${captures} responses learned${h2.embedded ? `, ${h2.embedded} embedded` : ''}`);
       }
 
-      // 4. Last resort for a first connect: ask for one click on Analyze.
-      n = await needs();
-      if (n.sales && run.interactive) {
-        await navigate(run, '/analyze');
-        await chrome.tabs.update(run.tabId, { active: true }).catch(() => undefined);
-        await note(run, 'Waiting for you: in the Merch tab, pick a date range on Analyze (for example “Last 30 days”). Loupe learns from it and takes over.');
-        const until = Date.now() + 180_000;
-        while (Date.now() < until && (await needs()).sales) {
-          await sleep(1000);
-          check(run);
-        }
-        have = await templates();
-        if (have.sales && !isStrongSales(have.sales)) have.sales = await verifySales(run, have.sales);
-      }
     }
 
     have = await templates();
@@ -895,7 +899,8 @@ async function execute(run: Run) {
     }
 
     // 5. Download.
-    if (have.sales) salesRows = await downloadSales(run, have.sales);
+    // Only a sales request that has returned sales is worth a full backfill.
+    if (isStrongSales(have.sales)) salesRows = await downloadSales(run, have.sales!);
     if (have.catalog && run.mode !== 'quick') catalogItems = (await downloadCatalog(run, have.catalog)).items;
 
     const salesOk = isStrongSales(have.sales) || salesRows > 0;
@@ -907,7 +912,9 @@ async function execute(run: Run) {
           ? 'Sales synced. Loupe read only part of your product list.'
           : 'Sales synced. Loupe has not found your product list yet.'
       : have.catalog
-        ? 'Products synced, but Loupe has not found your sales report yet.'
+        ? have.sales
+          ? 'Products synced. Merch answered with sales reports Loupe can’t read yet: copy the sync report and send it.'
+          : 'Products synced, but Loupe has not found your sales report yet. Open Analyze on Merch once and Loupe syncs by itself.'
         : 'Synced';
     await writeState(run, (s) => ({
       ...s,

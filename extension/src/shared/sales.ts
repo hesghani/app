@@ -20,10 +20,10 @@ type Obj = { [key: string]: Json };
 const KEYS = {
   asin: ['asin', 'childasin', 'productasin', 'itemasin'],
   date: ['date', 'day', 'purchasedate', 'orderdate', 'saledate', 'salesdate', 'transactiondate', 'reportdate', 'perioddate', 'datetime', 'purchasedatetime', 'timestamp', 'periodstart', 'time'],
-  units: ['units', 'unitssold', 'unitspurchased', 'purchasedunits', 'netunits', 'netunitssold', 'soldunits', 'purchased', 'quantity', 'quantitysold', 'qty', 'qtysold', 'sold', 'netsold', 'unitcount', 'orders', 'sales', 'salescount'],
+  units: ['units', 'unitssold', 'unitspurchased', 'purchasedunits', 'netunits', 'netunitssold', 'soldunits', 'purchased', 'quantity', 'quantitysold', 'qty', 'qtysold', 'sold', 'netsold', 'unitcount', 'totalunits', 'totalunitssold', 'unitsordered', 'orderedunits', 'netpurchased', 'purchasedcount', 'soldcount', 'orders', 'ordercount', 'sales', 'salescount'],
   cancelled: ['cancelled', 'canceled', 'unitscancelled', 'unitscanceled', 'cancellations', 'cancelledunits', 'canceledunits'],
   returned: ['returned', 'returns', 'unitsreturned', 'returnedunits'],
-  royalty: ['royalty', 'royalties', 'royaltyamount', 'royaltyamt', 'totalroyalty', 'totalroyalties', 'totalroyaltyamount', 'royaltyvalue', 'netroyalty', 'netroyalties', 'royaltyearned', 'royaltiesearned', 'estimatedroyalty', 'estimatedroyalties', 'earnings'],
+  royalty: ['royalty', 'royalties', 'royaltyamount', 'royaltiesamount', 'royaltyamt', 'totalroyalty', 'totalroyalties', 'totalroyaltyamount', 'royaltyvalue', 'netroyalty', 'netroyalties', 'royaltyearned', 'royaltiesearned', 'estimatedroyalty', 'estimatedroyalties', 'royaltyestimate', 'earnings', 'totalearnings', 'netearnings', 'estimatedearnings', 'earningsamount'],
   currency: ['currency', 'currencycode', 'royaltycurrency', 'royaltycurrencycode'],
   marketplace: ['marketplace', 'marketplaceid', 'marketplacename', 'marketplacecode', 'market', 'countrycode', 'country', 'site', 'domain', 'storefront', 'saleschannel', 'channel'],
   productType: ['producttype', 'garmenttype', 'shirttype', 'productcategory', 'producttypename', 'type'],
@@ -65,7 +65,7 @@ function toMoney(v: Json | undefined): { value: number | null; currency: Currenc
   }
   if (isObj(v)) {
     const amount = v.amount ?? v.value ?? v.total ?? v.royalty;
-    const code = v.currencyCode ?? v.currency ?? v.code;
+    const code = v.currencyCode ?? v.currency ?? v.code ?? v.unit ?? v.currencyUnit;
     const inner = toMoney(amount as Json);
     return { value: inner.value, currency: currencyFromText(typeof code === 'string' ? code : '') ?? inner.currency };
   }
@@ -120,17 +120,53 @@ function marketplaceFromCurrency(currency: Currency | null | undefined): Marketp
   return undefined;
 }
 
-/** The object's own fields plus those of its direct child objects, own fields winning. */
+/**
+ * Analytics APIs often send fields as name/value pairs:
+ * {dimensions: [{name: "asin", value: "B0…"}], metrics: [{name: "unitsSold", value: 3}]}.
+ * Returns them as plain fields, or null if `list` isn't such a list.
+ */
+function pairsToFields(list: Json[]): Obj | null {
+  if (!list.length || list.length > 60) return null;
+  const out: Obj = {};
+  for (const item of list) {
+    if (!isObj(item)) return null;
+    const name = item.name ?? item.key ?? item.field ?? item.metric ?? item.dimension ?? item.id;
+    if (typeof name !== 'string' || !('value' in item || 'values' in item)) return null;
+    const value = 'value' in item ? item.value : Array.isArray(item.values) ? (item.values[0] ?? null) : null;
+    out[name] = value as Json;
+  }
+  return out;
+}
+
+/** The object's own fields plus those of its direct child objects (and name/value pair lists), own fields winning. */
 function withChildFields(obj: Obj): Obj {
   const merged: Obj = {};
   for (const value of Object.values(obj)) {
     if (isObj(value) && !('amount' in value) && !('currencyCode' in value)) Object.assign(merged, value);
+    else if (Array.isArray(value)) {
+      const pairs = pairsToFields(value);
+      if (pairs) Object.assign(merged, pairs);
+    }
   }
   return Object.assign(merged, obj);
 }
 
+/** A Merch ASIN under a key Loupe doesn't know ("parentAsin", "asinId", …). */
+function asinByValue(obj: Obj): Json | undefined {
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === 'string' && /^B0[A-Z0-9]{8}$/.test(v.trim()) && (/asin/i.test(k) || /^(?:id|productid|itemid)$/i.test(k))) return v;
+  }
+  return undefined;
+}
+
+/** Holds a list of records (rather than being one). */
+function isContainer(obj: Obj): boolean {
+  return Object.values(obj).some((v) => Array.isArray(v) && v.some((x) => isObj(x)) && !pairsToFields(v));
+}
+
 function rowFrom(source: Obj, ctx: Context): SaleRow | null {
-  const asinRaw = pick(source, 'asin');
+  // The ASIN may sit on the record, in a child ({product: {asin}}) or in name/value pairs.
+  const asinRaw = pick(source, 'asin') ?? asinByValue(source) ?? (isContainer(source) ? undefined : pick(withChildFields(source), 'asin') ?? asinByValue(withChildFields(source)));
   const asin = typeof asinRaw === 'string' ? asinRaw.trim().toUpperCase() : '';
   if (!/^[A-Z0-9]{10}$/.test(asin)) return null;
   const obj = withChildFields(source);
