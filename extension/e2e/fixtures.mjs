@@ -88,11 +88,16 @@ export function productPage(asin) {
 }
 
 // ---------------------------------------------------------------------------
-// A stand-in Merch on Demand site. Two API styles exercise the learning sync:
-//   A: sales via GET with epoch-ms range and per-record dates (XHR);
-//      catalog via POST with next-page tokens.
+// A stand-in Merch on Demand site. Three API styles exercise the sync engine:
+//   A: sales via GET with epoch-ms range and per-record dates (XHR), on an
+//      endpoint Loupe knows; catalog via POST with next-page tokens.
 //   B: sales via POST with ISO dates, per-ASIN totals in a columnar table
-//      (no per-day dates); catalog via GET with page numbers.
+//      (no per-day dates); catalog via GET with page numbers, findable in
+//      the site's script bundle.
+//   C: the hostile one, modeled on the account that stalled: the API lives
+//      on another host (CORS), the dashboard shows a 10-product widget that
+//      isn't the catalog, Analyze first loads an empty "today" report,
+//      products page by cursor, and the account data is embedded in HTML.
 // Every API call needs the anti-forgery header the page sets.
 
 const TZ = 'America/Los_Angeles';
@@ -115,6 +120,7 @@ function zonedMidnight(day) {
 }
 
 const TOKEN = 'a2z-csrf-91f3';
+export const API_HOST = 'https://api.merch.amazon.com';
 const MIDS = { US: 'ATVPDKIKX0DER', DE: 'A1PA6795UKMFR9', UK: 'A1F83G8C2ARO7P' };
 
 export function createMerch(style = 'A') {
@@ -138,7 +144,7 @@ export function createMerch(style = 'A') {
     }
   });
   const listings = products.flatMap((p) => p.listings.map((l) => ({ ...l, product: p })));
-  const state = { extraToday: 0, apiCalls: 0, forbidden: 0, ssoBounced: false };
+  const state = { extraToday: 0, apiCalls: 0, forbidden: 0, ssoBounced: false, paths: {} };
 
   function units(product, mp, day) {
     const ago = daysBetween(day, today);
@@ -154,6 +160,8 @@ export function createMerch(style = 'A') {
     }
     if (mp === 'DE') u = ago % 4 === 0 ? 1 : 0;
     if (ago === 0 && product.title === 'Retro Pickleball Legend T-Shirt' && mp === 'US') u += state.extraToday;
+    // Style C: no sales yet today, so the first report Merch loads is empty.
+    if (style === 'C' && ago === 0) u = 0;
     return u;
   }
 
@@ -171,18 +179,42 @@ export function createMerch(style = 'A') {
 
   const royalty = (mp, u) => (mp === 'DE' ? { value: +(1.8 * u).toFixed(2), currencyCode: 'EUR' } : { value: +(2.44 * u).toFixed(2), currencyCode: 'USD' });
 
-  const nav = `<nav style="display:flex;gap:16px;padding:12px 20px;background:#fff;border-bottom:1px solid #ddd">
-    <a href="/dashboard">Dashboard</a><a href="/designs/create">Create</a><a href="/manage/products">Manage</a><a href="/analyze/sales">Analyze</a><a href="/advertising">Advertise</a></nav>`;
+  const nav = style === 'C'
+    ? `<nav style="display:flex;gap:16px;padding:12px 20px;background:#fff;border-bottom:1px solid #ddd">
+    <a href="#">Analytics</a><a href="#">Statistics</a><a href="/designs/create">Create</a><a href="javascript:void 0">Manage</a></nav>`
+    : `<nav style="display:flex;gap:16px;padding:12px 20px;background:#fff;border-bottom:1px solid #ddd">
+    <a href="/dashboard">Dashboard</a><a href="/designs/create">Create</a><a href="/manage/products">Manage</a><a href="/analyze">Analyze</a><a href="/advertising">Advertise</a></nav>`;
   const shell = (title, body, script = '') => `<!doctype html><html><head><meta charset="utf-8"><title>Merch on Demand - ${title}</title>
 <style>body{font:14px Arial,sans-serif;margin:0;background:#f7f8f8}header{background:#232f3e;color:#fff;padding:14px 20px;font-weight:bold}
 main{max-width:900px;margin:24px auto;background:#fff;padding:24px;border-radius:8px;display:grid;gap:14px}
 label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:inherit;padding:8px;border:1px solid #aaa;border-radius:4px}textarea{min-height:60px}</style></head>
-<body><header>amazon merch on demand</header>${nav}<main>${body}</main><script>const TOKEN='${TOKEN}';${script}</script></body></html>`;
+<body><header>amazon merch on demand</header>${nav}<main>${body}</main>${style === 'B' ? '<script src="/static/merch-app.js"></script>' : ''}<script>const TOKEN='${TOKEN}';${script}</script></body></html>`;
 
-  const pages = {
+  // Style B's script bundle names its API paths, like a real single-page app.
+  const bundle = `window.MERCH_API={sales:"/api/sales/report",listings:"/api/manage/listings",account:"/api/account/summary",remove:"/api/manage/listings/delete",upload:"/api/designs/upload"};`;
+
+  const C = {
+    dashboard: () => shell('Dashboard', `<h1>Dashboard</h1><div id="out">Loading…</div>
+      <script type="application/json" id="merch-state">${JSON.stringify({ account: { tier: 1000, dailyPublishLimit: 100, publishedToday: 4 } })}</script>`, `
+      fetch('${API_HOST}/v1/dashboard/recent-products', { credentials: 'include', headers: { 'anti-csrftoken-a2z': TOKEN } })
+        .then((r) => r.json()).then((j) => { document.getElementById('out').textContent = j.products.length + ' recent products'; });`),
+    analyze: () => shell('Analyze', '<h1>Analyze</h1><div id="out">Loading…</div>', `
+      const day = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+      fetch('${API_HOST}/v1/analytics/sales?marketplace=US&startDate=' + day + '&endDate=' + day, { credentials: 'include', headers: { 'anti-csrftoken-a2z': TOKEN, accept: 'application/json' } })
+        .then((r) => r.json()).then((j) => { document.getElementById('out').textContent = j.data.sales.length + ' sales today'; });`),
+    designs: () => shell('Designs', '<h1>Designs</h1><div id="out">Loading…</div>', `
+      fetch('${API_HOST}/v1/catalog/listings?limit=25', { credentials: 'include', headers: { 'anti-csrftoken-a2z': TOKEN } })
+        .then((r) => r.json()).then((j) => { document.getElementById('out').textContent = j.items.length + ' shown'; });`),
+  };
+
+  const pages = style === 'C' ? {
+    '/dashboard': C.dashboard,
+    '/analyze': C.analyze,
+    '/manage/designs': C.designs,
+  } : {
     '/dashboard': () => shell('Dashboard', '<h1>Dashboard</h1><div id="out">Loading…</div>', `
       fetch('/api/account/summary', { headers: { 'anti-csrftoken-a2z': TOKEN } }).then((r) => r.json()).then((j) => { document.getElementById('out').textContent = 'Tier ' + j.account.tier; });`),
-    '/analyze/sales': () => shell('Analyze', '<h1>Sales</h1><div id="out">Loading…</div>', style === 'A' ? `
+    '/analyze': () => shell('Analyze', '<h1>Sales</h1><div id="out">Loading…</div>', style === 'A' ? `
       const day = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
       const xhr = new XMLHttpRequest();
       xhr.open('GET', '/api/reporting/purchases/records?marketplaceId=ATVPDKIKX0DER&fromDate=' + window.FROM + '&toDate=' + window.TO);
@@ -198,14 +230,15 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
         .then((r) => r.json()).then((j) => { document.getElementById('out').textContent = j.products.length + ' shown'; });` : `
       fetch('/api/manage/listings?page=1&pageSize=10', { headers: { 'anti-csrftoken-a2z': TOKEN } })
         .then((r) => r.json()).then((j) => { document.getElementById('out').textContent = j.items.length + ' shown'; });`),
-    '/designs/create': () => shell('Create', `
+  };
+  pages['/analyze/sales'] ??= pages['/analyze'];
+  pages['/designs/create'] = () => shell('Create', `
       <div class="form-group"><label for="brand">Brand name<input id="brand" formcontrolname="brandName"></label></div>
       <div class="form-group"><label for="title">Product title<input id="title" formcontrolname="title"></label></div>
       <label>Key product features (optional)<textarea aria-label="Feature bullet 1" id="b1"></textarea></label>
       <label>Key product features (optional)<textarea aria-label="Feature bullet 2" id="b2"></textarea></label>
       <label>Product description (optional)<textarea id="desc" placeholder="Product description"></textarea></label>
-      <label>List price<input id="price" value="19.99"></label>`),
-  };
+      <label>List price<input id="price" value="19.99"></label>`);
 
   function api(method, url, body, headers) {
     state.apiCalls += 1;
@@ -214,6 +247,12 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
       return { status: 403, json: { message: 'Forbidden' } };
     }
     const path = url.pathname;
+    const owned = {
+      A: ['/api/account/summary', '/api/reporting/purchases/records', '/api/products/search'],
+      B: ['/api/account/summary', '/api/sales/report', '/api/manage/listings'],
+      C: ['/v1/dashboard/recent-products', '/v1/analytics/sales', '/v1/catalog/listings'],
+    }[style];
+    if (!owned.includes(path)) return { status: 404, json: { message: 'Not found' } };
     if (path === '/api/account/summary') return { json: { account: { tier: 1000, dailyPublishLimit: 100, publishedToday: 4 } } };
     if (path === '/api/reporting/purchases/records') {
       const mp = Object.keys(MIDS).find((k) => MIDS[k] === url.searchParams.get('marketplaceId'));
@@ -225,6 +264,7 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
       return { json: { records } };
     }
     if (path === '/api/sales/report') {
+      if (method !== 'POST') return { status: 405, json: { message: 'Method not allowed' } };
       const b = JSON.parse(body);
       const mp = b.marketplaces[0];
       const totals = new Map();
@@ -247,12 +287,42 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
       };
     }
     if (path === '/api/manage/listings') {
-      const page = Number(url.searchParams.get('page'));
-      const size = Number(url.searchParams.get('pageSize'));
+      const page = Number(url.searchParams.get('page') ?? 1);
+      const size = Number(url.searchParams.get('pageSize') ?? 10);
       const slice = listings.slice((page - 1) * size, page * size);
       return { json: { totalCount: listings.length, items: slice.map((l) => ({ asin: l.asin, title: l.product.title, status: l.product.status === 'LIVE' ? 'Live' : 'Rejected', marketplace: `amazon.${l.mp === 'DE' ? 'de' : 'com'}`, productType: l.product.type, created: zonedMidnight(l.product.created) })) } };
     }
+    // Style C's API, on its own host.
+    if (path === '/v1/dashboard/recent-products') {
+      return { json: { products: products.slice(0, 10).map((p) => ({ id: p.id, title: p.title, asin: p.listings[0].asin, status: p.status, productType: p.type })) } };
+    }
+    if (path === '/v1/analytics/sales') {
+      const mp = url.searchParams.get('marketplace');
+      const sales = MIDS[mp] ? salesFor(mp, url.searchParams.get('startDate'), url.searchParams.get('endDate')).map(({ day, l, u }) => ({
+        orderDate: day, asin: l.asin, productTitle: l.product.title, productType: l.product.type, marketplace: mp, unitsSold: u, royalties: { amount: royalty(mp, u).value, currencyCode: royalty(mp, u).currencyCode },
+      })) : [];
+      return { json: { data: { sales, generatedAt: new Date().toISOString() } } };
+    }
+    if (path === '/v1/catalog/listings') {
+      const limit = Math.min(Number(url.searchParams.get('limit') ?? 25), 50);
+      const start = url.searchParams.get('cursor') ? Number(atob(url.searchParams.get('cursor'))) : 0;
+      const slice = listings.slice(start, start + limit);
+      const next = start + limit < listings.length ? btoa(String(start + limit)) : null;
+      return { json: { items: slice.map((l) => ({ asin: l.asin, title: l.product.title, status: l.product.status, productType: l.product.type, marketplaceId: MIDS[l.mp], createdAt: `${l.product.created}T09:00:00Z` })), nextCursor: next } };
+    }
     return { status: 404, json: { message: 'Not found' } };
+  }
+
+  const cors = { 'access-control-allow-origin': 'https://merch.amazon.com', 'access-control-allow-credentials': 'true', 'access-control-allow-headers': 'anti-csrftoken-a2z, content-type, accept', 'access-control-allow-methods': 'GET, POST, OPTIONS' };
+
+  /** Style C's API host. */
+  async function handleApi(route) {
+    const req = route.request();
+    if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
+    const url = new URL(req.url());
+    state.paths[url.pathname] = (state.paths[url.pathname] ?? 0) + 1;
+    const res = api(req.method(), url, req.postData(), await req.allHeaders());
+    return route.fulfill({ status: res.status ?? 200, headers: { ...cors, 'content-type': 'application/json' }, body: JSON.stringify(res.json) });
   }
 
   async function handle(route) {
@@ -267,11 +337,14 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
       const signin = `https://www.amazon.com/ap/signin?openid.return_to=${encodeURIComponent(back)}`;
       return route.fulfill({ contentType: 'text/html', body: `<html><body><script>location.replace(${JSON.stringify(signin)})</script></body></html>` });
     }
+    if (url.pathname === '/static/merch-app.js') return route.fulfill({ contentType: 'application/javascript', body: bundle });
     if (url.pathname.startsWith('/api/')) {
+      state.paths[url.pathname] = (state.paths[url.pathname] ?? 0) + 1;
+      if (style === 'C') return route.fulfill({ status: 404, contentType: 'application/json', body: '{"message":"Not found"}' });
       const res = api(req.method(), url, req.postData(), await req.allHeaders());
       return route.fulfill({ status: res.status ?? 200, contentType: 'application/json;charset=UTF-8', body: JSON.stringify(res.json) });
     }
-    const page = pages[url.pathname] ?? pages['/dashboard'];
+    const page = pages[url.pathname] ?? (url.pathname === '/' ? pages['/dashboard'] : () => shell('Not found', '<h1>Page not found</h1>'));
     let html = page();
     if (style === 'A') {
       const from = zonedMidnight(addDays(today, -6));
@@ -281,5 +354,5 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
     return route.fulfill({ contentType: 'text/html', body: html });
   }
 
-  return { handle, state, today, listings, products, designs };
+  return { handle, handleApi, state, today, listings, products, designs };
 }

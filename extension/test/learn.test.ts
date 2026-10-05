@@ -1,4 +1,4 @@
-import { buildRequest, chunks, describeRequest, describeShape, isSafeToReplay, learn, nextPage, rankTemplates, type Capture } from '../src/shared/learn';
+import { buildRequest, chunks, describeRequest, describeShape, isSafeToReplay, isStrongCatalog, isStrongSales, learn, nextPage, rankTemplates, type Capture } from '../src/shared/learn';
 import { normalizeCatalog, normalizeStatus } from '../src/shared/catalog';
 import { normalizeSales } from '../src/shared/sales';
 import { shiftZonedDays, zonedDay, zonedToEpoch } from '../src/shared/zoned';
@@ -209,5 +209,32 @@ describe('sync report', () => {
     expect(text).toContain('fromDate=<epoch-ms>');
     expect(text).toContain('header names: anti-csrftoken-a2z');
     expect(text).not.toMatch(/SECRET-TOKEN|My Secret Design|B0AAAAAAAA|4\.88/);
+  });
+});
+
+describe('telling the real thing from a widget', () => {
+  it('keeps an empty sales report as a candidate to verify, not as nothing', () => {
+    const empty = learn(cap({ url: 'https://api.merch.amazon.com/v1/analytics/sales?marketplace=US&startDate=2026-10-05&endDate=2026-10-05', payload: { data: { sales: [] } } }));
+    expect(empty.kind).toBe('sales');
+    expect(empty.template?.rows).toBe(0);
+    expect(empty.template?.window).toEqual({ from: '2026-10-05', to: '2026-10-05' });
+    expect(isStrongSales(empty.template)).toBe(false);
+    // An empty list that isn't a report stays unknown.
+    expect(learn(cap({ url: 'https://merch.amazon.com/api/notifications?since=2026-10-05', payload: { items: [] } })).kind).toBe('none');
+  });
+
+  it('a dashboard widget with 10 products is not the catalog; a paged list is', () => {
+    const products = Array.from({ length: 10 }, (_, i) => ({ asin: `B0AAAAAA${String(i).padStart(2, '0')}`, title: `Design ${i}`, status: 'LIVE', productType: 'STANDARD_TSHIRT' }));
+    const widget = learn(cap({ url: 'https://merch.amazon.com/api/dashboard/recent-products', payload: { products } })).template;
+    expect(widget?.kind).toBe('catalog');
+    expect(isStrongCatalog(widget)).toBe(false);
+    const paged = learn(cap({ url: 'https://merch.amazon.com/api/listings?limit=10', payload: { items: products, nextCursor: 'abc' } })).template;
+    expect(isStrongCatalog(paged)).toBe(true);
+    expect(rankTemplates([widget!, paged!])[0]).toBe(paged);
+  });
+
+  it('replays GraphQL queries but never mutations', () => {
+    expect(isSafeToReplay('POST', 'https://merch.amazon.com/graphql', '{"query":"query Sales { sales { asin } }"}')).toBe(true);
+    expect(isSafeToReplay('POST', 'https://merch.amazon.com/graphql', '{"query":"mutation Delete { deleteDesign(id: 1) }"}')).toBe(false);
   });
 });

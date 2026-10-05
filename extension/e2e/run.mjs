@@ -1,6 +1,7 @@
 // End-to-end check: loads the built extension into Chromium, serves stand-in
 // Amazon and Merch on Demand sites, and drives every surface, including the
-// full "Connect Merch account" flow against two different Merch API styles.
+// full "Connect Merch account" flow against three different Merch API styles
+// (one of them modeled on a real account where an earlier sync stalled).
 // Screenshots go to e2e/out.
 //   npm run e2e            (set CHROMIUM_PATH to use a specific browser)
 
@@ -11,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
-import { ASINS, createMerch, productPage, searchPage } from './fixtures.mjs';
+import { API_HOST, ASINS, createMerch, productPage, searchPage } from './fixtures.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const dist = join(root, 'dist');
@@ -78,6 +79,7 @@ async function launch(style) {
     return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ suggestions }) });
   });
   await context.route(/https:\/\/merch\.amazon\.com\/.*/, (route) => merch.handle(route));
+  await context.route((url) => url.href.startsWith(`${API_HOST}/`), (route) => merch.handleApi(route));
   const worker = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker'));
   const extensionId = new URL(worker.url()).host;
   const ext = (path) => `chrome-extension://${extensionId}/${path}`;
@@ -117,21 +119,27 @@ const dbAll = (page, store) =>
   );
 
 async function connect(dash, label) {
-  await dash.evaluate(() => chrome.storage.local.set({ settings: { historyDays: 400, syncDelayMs: 15 } }));
+  await dash.evaluate(() => chrome.storage.local.set({ settings: { historyDays: 400 } }));
   const before = (await storage(dash, 'syncState'))?.startedAt ?? 0;
   const context = dash.context();
   const opened = context.waitForEvent('page', { timeout: 15000 });
+  const started = Date.now();
   await dash.locator(`button:has-text("${label}")`).first().click();
   // A tab the extension opens can start loading before Playwright's request
-  // interception attaches to it; load it again once it's attached.
+  // interception attaches to it (it then shows an error page, which the
+  // engine also recovers from by reloading); load it again once attached.
   const tab = await opened;
   await tab.waitForLoadState('domcontentloaded').catch(() => undefined);
-  if (!tab.url().startsWith('https://merch.amazon.com/')) await tab.goto('https://merch.amazon.com/dashboard');
-  return until(async () => {
+  if (!tab.isClosed() && !tab.url().startsWith('https://merch.amazon.com/')) await tab.goto('https://merch.amazon.com/dashboard').catch(() => undefined);
+  const s = await until(async () => {
     const s = await storage(dash, 'syncState');
     if (s && (s.startedAt ?? 0) > before && ['done', 'partial', 'error', 'signin'].includes(s.status)) return s;
     return null;
   }, { timeout: 120000, interval: 500, message: 'the connect sync to finish' });
+  const seconds = (Date.now() - started) / 1000;
+  console.log(`    connect took ${seconds.toFixed(1)} s, ${s.stats?.requests ?? '?'} requests`);
+  if (process.env.E2E_DEBUG || s.status !== 'done') console.log((s.log ?? []).map((l) => `      ${l}`).join('\n'));
+  return { ...s, seconds, tab };
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +220,10 @@ console.log('Scenario A: research overlays, connect (GET + epoch dates, POST + t
       assert.equal(merch.state.forbidden, 0, 'every replayed request carried the anti-forgery header');
       assert.equal((await storage(dash, 'account')).tier, 1000);
       assert.ok(merch.state.ssoBounced, 'the sign-in bounce happened and the sync carried on');
-      merchTab = context.pages().find((p) => p.url().startsWith('https://merch.amazon.com/'));
+      assert.ok(!(merch.state.paths['/api/products/search'] > 0 && s.log.some((l) => l.includes('Opening /analyze'))), 'sales came from a known endpoint without opening Analyze');
+      assert.ok(s.tab.isClosed(), 'the background tab Loupe opened was closed');
+      merchTab = await context.newPage();
+      await merchTab.goto('https://merch.amazon.com/dashboard');
       await merchTab.waitForFunction(() => document.querySelector('loupe-dock')?.shadowRoot?.textContent?.includes('Loupe is connected'));
       await merchTab.screenshot({ path: join(out, 'connected.png') });
     });
@@ -235,14 +246,16 @@ console.log('Scenario A: research overlays, connect (GET + epoch dates, POST + t
       await dash.screenshot({ path: join(out, 'designs.png') });
     });
 
-    await step('a quick sync picks up new sales, notifies and updates the badge', async () => {
+    await step('a quick sync in your open Merch tab picks up new sales, notifies and updates the badge', async () => {
       merch.state.extraToday = 3;
+      const tabsBefore = context.pages().length;
       const before = (await storage(dash, 'syncState')).startedAt;
       await dash.evaluate(() => chrome.runtime.sendMessage({ type: 'sync:start', mode: 'quick', interactive: false }));
       await until(async () => {
         const s = await storage(dash, 'syncState');
         return s.startedAt > before && s.status === 'done';
       }, { timeout: 30000, message: 'quick sync' });
+      assert.equal(context.pages().length, tabsBefore, 'used the open Merch tab, opened none');
       const notes = await worker.evaluate(() => new Promise((resolve) => chrome.notifications.getAll(resolve)));
       assert.equal(Object.keys(notes).filter((id) => id.startsWith('sale-')).length, 1, 'one new-sale notification');
       assert.match(await worker.evaluate(() => chrome.action.getBadgeText({})), /^\d+$/);
@@ -306,7 +319,9 @@ console.log('Scenario A: research overlays, connect (GET + epoch dates, POST + t
       });
       console.log(`    sync report: ${report === 'clipboard unavailable' ? 'clipboard unavailable in this browser' : `${report.split('\n').length} lines`}`);
       if (report !== 'clipboard unavailable') {
-        assert.match(report, /Learned templates \(2\)/);
+        assert.match(report, /Learned templates \(\d\)/);
+        assert.match(report, /Sync log:/);
+        assert.match(report, /Requests tried/);
         assert.doesNotMatch(report, /Pickleball|Dinkworthy|a2z-csrf/, 'report contains no titles, brands or header values');
       }
     });
@@ -370,6 +385,47 @@ console.log('Scenario B: sample data first, then connect (POST + ISO dates, unda
       const text = await dash.locator('main').textContent();
       assert.match(text, /Replace 12 designs with no sales/);
       assert.doesNotMatch(text, /sample data/);
+    });
+  } finally {
+    await close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+console.log('Scenario C: hostile Merch (API on another host, 10-product widget, empty first report, cursor paging, embedded account data)');
+{
+  const { context, merch, ext, close } = await launch('C');
+  try {
+    const dash = await until(() => context.pages().find((p) => p.url().includes('dashboard.html')), { timeout: 5000, message: 'welcome tab' });
+    await step('connect finishes in under a minute with full history and the whole catalog', async () => {
+      await dash.goto(ext('dashboard.html#overview'));
+      await dash.waitForSelector('text=Connect Merch account');
+      const s = await connect(dash, 'Connect Merch account');
+      assert.equal(s.status, 'done', `sync finished as ${s.status}: ${s.phase} ${s.error ?? ''}`);
+      assert.ok(s.seconds < 60, `connect took ${s.seconds} s`);
+      const templates = await storage(dash, 'templates');
+      const sales = templates.find((t) => t.kind === 'sales');
+      assert.ok(sales.url.startsWith(API_HOST), 'learned the sales report on the API host');
+      assert.ok(sales.rows > 0, 'the empty first report was verified with a wider range');
+      assert.equal(await dbCount(dash, 'catalog'), merch.listings.length, 'whole catalog, not the 10-product widget');
+      const rows = await dbAll(dash, 'sales');
+      assert.ok(rows.length > 300, `sales rows: ${rows.length}`);
+      assert.ok(rows.some((r) => r.marketplace === 'DE'), 'German sales downloaded');
+      assert.equal((await storage(dash, 'account')).tier, 1000, 'account tier read from data embedded in the page');
+      assert.equal(merch.state.forbidden, 0);
+    });
+
+    await step('Stop ends a running sync right away', async () => {
+      await dash.evaluate(() => chrome.storage.local.set({ meta: {} }));
+      await dash.evaluate(() => chrome.runtime.sendMessage({ type: 'sync:start', mode: 'full', interactive: false }));
+      await until(async () => (await storage(dash, 'syncState')).status === 'running', { timeout: 5000, message: 'sync running' });
+      await dash.evaluate(() => chrome.runtime.sendMessage({ type: 'sync:stop' }));
+      const s = await until(async () => {
+        const s = await storage(dash, 'syncState');
+        return s.status !== 'running' ? s : null;
+      }, { timeout: 20000, message: 'sync to stop' });
+      assert.equal(s.status, 'idle');
+      assert.equal(s.phase, 'Stopped.');
     });
   } finally {
     await close();

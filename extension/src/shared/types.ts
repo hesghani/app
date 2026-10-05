@@ -148,6 +148,23 @@ export interface SyncState {
   visited?: string[];
   stats?: { salesRows: number; catalogItems: number; requests: number; errors: number };
   error?: string;
+  /** Last time the run reported anything; a running sync silent for minutes is stuck. */
+  updatedAt?: number;
+  /** What the run did, step by step (newest last). */
+  log?: string[];
+  /** Times the watchdog restarted this run. */
+  restarts?: number;
+}
+
+/** What the last sync tried, for the sync report. Paths and value kinds only, never values. */
+export interface SyncDebug {
+  at: number;
+  probes: Array<{ request: string; status: number; kind: string; rows: number; items: number; ms: number; note?: string; keys?: string[] }>;
+  /** API-like paths found in Merch's own scripts. */
+  discovered: string[];
+  /** Data requests Merch's pages made, from the browser's resource timing. */
+  resources: string[];
+  pages: Array<{ url: string; landed: string; captures: number; embedded: number }>;
 }
 
 /** Numbers about the account (tier, limits) found in Merch's responses. */

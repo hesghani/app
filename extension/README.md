@@ -13,7 +13,7 @@ stays in your browser.
 
 | Area | Features |
 | --- | --- |
-| **Account sync** | One click on **Connect Merch account**: Loupe opens Merch in a tab, learns how your sales report and product list load, then downloads up to 400 days of daily sales across all marketplaces and every product in your catalog. After that it syncs on its own every 30 minutes, with new-sale notifications and today's units on the toolbar icon. |
+| **Account sync** | One click on **Connect Merch account**: working in a background Merch tab with your signed-in session, Loupe finds where Merch serves your sales and products and downloads up to 400 days of daily sales across all marketplaces and every product in your catalog, usually in about a minute. After that it syncs on its own every 30 minutes, with new-sale notifications and today's units on the toolbar icon. |
 | **Portfolio agent** | Groups your products into designs and niches and ranks actions: designs to **replace** (no sales in a year, with slot math against your tier), best sellers to **put on more product types** and **marketplaces**, designs **taking off** or **slowing down**, **niches to double down on or stop**, **upcoming seasons** with upload deadlines and last year's numbers, high **return rates**, and **price tests**. Every action lists its designs with ASINs and CSV export. |
 | **Designs** | Your whole catalog grouped by design, including designs that never sold, with 30/90/365-day units, royalties, last sale and age. |
 | **Amazon search** | Toolbar with a **niche score**, median BSR, number of results under 100k BSR, average estimated sales, median age, Merch share and result count. A badge on every result shows its BSR, estimated monthly sales, age, Merch detection, sub-category rank and review count. Sort by best BSR, newest or reviews; filter to Merch only, hide ads, cap the BSR; export CSV; copy ASINs; one-click **Merch filter** that limits the search to Merch shirts. |
@@ -57,36 +57,58 @@ Works in Chrome 116+ and other Chromium browsers (Edge, Brave, Arc).
 
 ## How account sync works
 
-Merch on Demand has no public API, and its private one changes without notice. So Loupe
-doesn't hard-code any endpoint. It **learns** from your own account:
+Merch on Demand has no public API, and its private one changes without notice. Loupe
+syncs the way the fast Merch tools do: it calls Merch's own data endpoints directly with
+the session you're already signed in with, from the background. It doesn't click through
+pages and wait for them.
 
-1. **Connect.** Loupe opens merch.amazon.com in a new tab. You're already signed in, so
-   Merch's pages load your data as usual. Loupe follows Merch's own **Analyze** and
-   **Manage** links and watches which requests return sales and products.
-2. **Learn.** For each of those requests it works out where the date range is (query or
-   JSON body; ISO dates or timestamps, Pacific time), where the marketplace is, and how
-   pages are requested (page numbers, offsets or next-page tokens). It also notes the
-   anti-forgery header Merch sends, so its own requests look exactly like Merch's.
-3. **Download.** It replays those requests from the Merch tab for every month going back
-   (400 days by default), every marketplace and every page of your catalog, at a gentle
-   pace. Reports without per-day dates are read day by day for recent weeks, plus 30, 90
-   and 365-day totals per product.
-4. **Stay in sync.** Every 30 minutes Loupe repeats the recent days (and the catalog once a
-   day) in an open Merch tab, or a background tab it closes afterwards. New sales trigger a
-   notification. If Merch signs you out, Loupe asks you to sign in and backs off.
+1. **A Merch tab to work in.** Loupe uses a Merch tab you have open. If none is open, it
+   opens one in the background and closes it when done. Requests run inside that tab
+   (`chrome.scripting`, page world), so they carry your Merch session and Merch's origin,
+   plus the anti-forgery header Merch's own requests use. The whole run is driven by the
+   service worker, so nothing has to survive a page navigation.
+2. **Find your data, fastest first.** Loupe looks in this order:
+   1. requests it already learned for your account (checked again on every run);
+   2. endpoints Merch is known to serve sales, products and account data from;
+   3. API paths written in Merch's own scripts, which it reads and tries;
+   4. data the Merch page embedded in its HTML or loaded itself.
+
+   Only if none of those work does it open **Analyze**, **Earnings** and
+   **Manage → Designs** in its own background tab and learn from the requests those pages
+   make. A request that returns an empty report (no sales yet today) is checked again with
+   a 30-day range before Loupe trusts it. A dashboard widget showing your 10 newest products
+   doesn't count as your product list.
+3. **Learn.** For each working request Loupe works out where the date range is (query or
+   JSON body; ISO dates or timestamps, Pacific time), where the marketplace is, and how pages
+   are requested (page numbers, offsets or next-page tokens).
+4. **Download.** It replays those requests for every month going back (400 days by
+   default) and every marketplace, four at a time, and reads your catalog in pages of up to
+   250, several at once when the list allows it. Reports without per-day dates are read day
+   by day for recent weeks, plus 30, 90 and 365-day totals per product.
+5. **Stay in sync.** Every 30 minutes Loupe repeats the recent days (and the catalog once a
+   day). New sales trigger a notification. If Merch signs you out, Loupe asks you to sign in
+   and continues by itself once you have.
+
+Every request has a timeout and every step is logged. A watchdog checks every 30 seconds
+that the sync is still making progress: it restarts a run the browser interrupted and ends
+one that hangs, saying where it stopped. **Stop** ends a run at any time.
 
 Loupe only ever replays **read** requests: anything that looks like publish, delete,
-update or upload is never repeated.
+update, upload or a GraphQL mutation is never repeated.
 
-**If Connect doesn't finish**, go to **Settings → Sync diagnostics** and click
-**Copy sync report**. The report lists the requests Merch made and the *shape* of each
-response (parameter names, value types, field names): no titles, prices, ASINs or header
-values. Send it to the developer and the sync can be adapted to your account.
+**If a sync doesn't finish**, click **Copy sync report** on the sync card (or in
+**Settings → Sync diagnostics**). The report has the step-by-step log, every request Loupe
+tried with its status, the pages it opened, the data requests Merch's pages made and the
+API paths in Merch's scripts. Responses are described only by their *shape* (parameter
+names, value types, field names): no titles, prices, ASINs or header values. Send it to the
+developer and the sync can be adapted to your account.
 
-> Merch's real pages couldn't be tested from the build environment, so the sync is verified
-> end to end against a stand-in Merch site with two deliberately different API styles
-> (`e2e/fixtures.mjs`). Your account is the first real test, and that's what the sync
-> report is for.
+> Merch's real pages can't be reached from the build environment, so the sync is verified
+> end to end against a stand-in Merch site with three deliberately different API styles
+> (`e2e/fixtures.mjs`). One of them reproduces the account where an earlier version stalled:
+> the API on another host, a 10-product dashboard widget, an empty first report, cursor
+> paging and account data embedded in the page. Connect finishes in about 3 to 10 seconds
+> against each of them.
 
 ## Estimates: read these as ballparks
 
@@ -112,7 +134,9 @@ sync report.
 | Permission | Why |
 | --- | --- |
 | `amazon.com`, `.co.uk`, `.de`, `.fr`, `.it`, `.es`, `.co.jp` | Search and product page overlays; reading product pages for BSR |
-| `merch.amazon.com` | Sales capture and the listing tools dock |
+| `merch.amazon.com` | Account sync and the listing tools dock |
+| `scripting` | Runs the sync's requests inside a Merch tab, with your Merch session |
+| `*.media-amazon.com`, `*.ssl-images-amazon.com` | Reading Merch's own script files to find its data endpoints |
 | `completion.amazon.*` | Keyword suggestions |
 | `storage`, `unlimitedStorage` | Your sales history, watchlist and drafts |
 | `alarms`, `offscreen` | Scheduled account sync and background BSR refresh for tracked products |
@@ -136,12 +160,13 @@ Playwright's Chromium (`npx playwright-core install chromium`).
 
 ```
 src/
-  shared/      Pure logic: learn.ts (sync engine), agent.ts (portfolio agent), parsers, sales and
+  shared/      Pure logic: learn.ts (request learning), agent.ts (portfolio agent), parsers, sales and
                catalog normalizers, BSR and royalty models, analytics, storage (IndexedDB + chrome.storage)
   content/
     amazon/    Search overlay and product panel (Preact in shadow DOM)
-    merch/     main-world.ts (capture), sync.ts (connect and backfill), index.tsx (banner, dock, listing tools)
-  background/  Service worker: sync orchestration, data writes, notifications, badge, alarms, context menus
+    merch/     main-world.ts (capture), index.tsx (banner, dock, listing tools)
+  background/  Service worker: sync.ts (the sync engine), page.ts (code it runs in the Merch tab),
+               data writes, notifications, badge, alarms, context menus
   offscreen/   DOMParser for background BSR refreshes
   dashboard/   Full-page app: overview, products, research, watchlist, trademarks, listings, royalties, settings
   popup/       Toolbar popup

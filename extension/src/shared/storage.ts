@@ -3,7 +3,7 @@
 
 import { withDefaults, type Settings } from './settings';
 import type { Template } from './learn';
-import type { AccountFacts, CaptureLogEntry, ListingDraft, NicheResult, ProductData, SaleRow, StoredProduct, SyncState } from './types';
+import type { AccountFacts, CaptureLogEntry, ListingDraft, NicheResult, ProductData, SaleRow, StoredProduct, SyncDebug, SyncState } from './types';
 import type { MarketplaceId } from './marketplaces';
 
 export interface Meta {
@@ -28,6 +28,7 @@ interface Schema {
   captureLog: CaptureLogEntry[];
   templates: Template[];
   syncState: SyncState;
+  syncDebug: SyncDebug | null;
   account: AccountFacts | null;
   agentDismissed: string[];
   meta: Meta;
@@ -43,6 +44,7 @@ const EMPTY: { [K in Key]: Schema[K] } = {
   captureLog: [],
   templates: [],
   syncState: { status: 'idle', mode: 'quick', phase: '' },
+  syncDebug: null,
   account: null,
   agentDismissed: [],
   meta: {},

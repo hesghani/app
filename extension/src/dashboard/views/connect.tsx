@@ -15,6 +15,20 @@ export async function startSync(mode: SyncMode, interactive = true) {
   return chrome.runtime.sendMessage({ type: 'sync:start', mode, interactive } satisfies Message);
 }
 
+export async function stopSync() {
+  return chrome.runtime.sendMessage({ type: 'sync:stop' } satisfies Message);
+}
+
+/** The sync's step-by-step log, newest last. */
+function SyncLog({ lines, max }: { lines: string[]; max: number }) {
+  if (!lines.length) return null;
+  return (
+    <pre class="small muted" style={{ margin: 0, maxHeight: '180px', overflow: 'auto', whiteSpace: 'pre-wrap', fontFamily: 'ui-monospace, monospace', fontSize: '11px', lineHeight: 1.5 }}>
+      {lines.slice(-max).join('\n')}
+    </pre>
+  );
+}
+
 export function reportText(data: Data): string {
   return syncReport({
     version: chrome.runtime.getManifest().version,
@@ -22,6 +36,7 @@ export function reportText(data: Data): string {
     templates: data.templates,
     captureLog: data.captureLog,
     syncState: data.syncState,
+    syncDebug: data.syncDebug,
     counts: { sales: data.sales.length, catalog: data.catalog.length, totals: data.totals.length },
     coverage: data.meta.coverage,
     accountKeys: Object.keys(data.account?.facts ?? {}),
@@ -72,7 +87,7 @@ export function ConnectCard({ data, compact = false }: { data: Data; compact?: b
             <p class="muted small" style={{ marginTop: '4px' }}>
               {connected
                 ? `Last synced ${fmt.ago(last)} · ${fmt.int(data.sales.length)} daily sales rows · ${fmt.int(data.catalog.length)} products${data.meta.coverage?.salesFrom ? ` · history from ${fmt.day(data.meta.coverage.salesFrom, 'long')}` : ''}`
-                : 'Loupe uses the Merch session you are already signed in with. It opens Merch in a tab, learns how your sales report and product list load, then downloads your full history. Nothing leaves your browser.'}
+                : 'Loupe uses the Merch session you are already signed in with. It works in a background Merch tab, finds where Merch loads your sales and products, and downloads your full history, usually in about a minute. Nothing leaves your browser.'}
             </p>
           </div>
           {!running && (
@@ -84,14 +99,28 @@ export function ConnectCard({ data, compact = false }: { data: Data; compact?: b
 
         {running && (
           <div class="stack" style={{ gap: '6px' }}>
-            <div class="row small"><b>Syncing…</b><span class="muted">{s.phase}</span><span class="right muted num">{pct !== null ? `${pct}%` : ''}</span></div>
+            <div class="row small">
+              <b>Syncing…</b>
+              <span class="muted grow">{s.phase}</span>
+              <span class="muted num">{pct !== null ? `${pct}%` : ''}</span>
+              <button class="btn sm" onClick={() => void stopSync()}>Stop</button>
+            </div>
             <div class="progress"><div style={{ width: `${pct ?? 15}%` }} /></div>
-            <span class="hint">Keep the Merch tab Loupe opened. You can keep working elsewhere.</span>
+            <SyncLog lines={s.log ?? []} max={8} />
+            <div class="row wrap">
+              <span class="hint grow">Loupe works in a background Merch tab and closes it when done. You can keep working.</span>
+              <CopyReport data={data} />
+            </div>
           </div>
         )}
 
         {s.status === 'signin' && <Notice kind="warn">{s.phase} <a href="https://merch.amazon.com/" target="_blank" rel="noopener">Open Merch</a></Notice>}
-        {s.status === 'partial' && <Notice kind="warn">{s.phase}</Notice>}
+        {s.status === 'partial' && (
+          <Notice kind="warn">
+            {s.phase}
+            <div class="row wrap" style={{ marginTop: '8px' }}><CopyReport data={data} /></div>
+          </Notice>
+        )}
         {s.status === 'error' && (
           <Notice kind="bad">
             <b>{s.phase}</b> {s.error ?? ''}
@@ -102,6 +131,7 @@ export function ConnectCard({ data, compact = false }: { data: Data; compact?: b
             <div class="small" style={{ marginTop: '6px' }}>
               The report lists which requests Merch made and their shapes (no titles, prices or personal data). Send it to the developer and the sync can be fixed for your account.
             </div>
+            <div style={{ marginTop: '8px' }}><SyncLog lines={s.log ?? []} max={30} /></div>
           </Notice>
         )}
         {s.status === 'done' && s.stats && !compact && (

@@ -3,7 +3,7 @@
 // names and value kinds only (never values, titles or header contents).
 
 import { describeRequest, type Template } from './learn';
-import type { CaptureLogEntry, SyncState } from './types';
+import type { CaptureLogEntry, SyncDebug, SyncState } from './types';
 
 export interface ReportInput {
   version: string;
@@ -11,6 +11,7 @@ export interface ReportInput {
   templates: Template[];
   captureLog: CaptureLogEntry[];
   syncState: SyncState;
+  syncDebug?: SyncDebug | null;
   counts: { sales: number; catalog: number; totals: number };
   coverage: unknown;
   accountKeys: string[];
@@ -24,6 +25,35 @@ export function syncReport(r: ReportInput): string {
   if (r.syncState.stats) lines.push(`Last run: ${JSON.stringify(r.syncState.stats)}`);
   lines.push(`Stored: ${r.counts.sales} sales rows, ${r.counts.catalog} catalog items, ${r.counts.totals} range totals · coverage ${JSON.stringify(r.coverage ?? {})}`);
   if (r.accountKeys.length) lines.push(`Account fields seen: ${r.accountKeys.join(', ')}`);
+  if (r.syncState.log?.length) {
+    lines.push('');
+    lines.push('Sync log:');
+    for (const l of r.syncState.log) lines.push(`  ${l}`);
+  }
+  const d = r.syncDebug;
+  if (d) {
+    lines.push('');
+    lines.push(`Requests tried (${d.probes.length}):`);
+    for (const p of d.probes) {
+      lines.push(`- [${p.status}] ${p.request} → ${p.kind} rows=${p.rows} items=${p.items} ${p.ms}ms`);
+      for (const k of (p.keys ?? []).slice(0, 10)) lines.push(`    ${k}`);
+    }
+    if (d.pages.length) {
+      lines.push('');
+      lines.push('Pages opened:');
+      for (const p of d.pages) lines.push(`- ${p.url} → ${p.landed} · ${p.captures} learned · ${p.embedded} embedded`);
+    }
+    if (d.resources.length) {
+      lines.push('');
+      lines.push(`Data requests Merch's pages made (${d.resources.length}):`);
+      for (const u of d.resources) lines.push(`- ${u}`);
+    }
+    if (d.discovered.length) {
+      lines.push('');
+      lines.push(`API paths in Merch's scripts (${d.discovered.length}):`);
+      for (const u of d.discovered) lines.push(`- ${u}`);
+    }
+  }
   lines.push('');
   lines.push(`Learned templates (${r.templates.length}):`);
   for (const t of r.templates) {

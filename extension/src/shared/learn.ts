@@ -74,10 +74,12 @@ const DATE_WORDS = new Set(['date', 'day', 'time', 'timestamp', 'from', 'to', 's
 const DESTRUCTIVE = /delete|remove|update|publish|create|submit|save|upload|edit|cancel|archive|patch|duplicate|clone|send|write|modify|logout|signout|purchase\/new/i;
 
 /** Only read requests are ever replayed. */
-export function isSafeToReplay(method: string, url: string): boolean {
+export function isSafeToReplay(method: string, url: string, body?: string): boolean {
   const m = method.toUpperCase();
   if (m === 'GET') return true;
   if (m !== 'POST') return false;
+  // GraphQL: queries read, mutations write.
+  if (body && /(^|["{\s])mutation\b/.test(body.slice(0, 400))) return false;
   let path = url;
   try {
     path = new URL(url).pathname;
@@ -349,16 +351,41 @@ export function requestContext(c: Capture): Context {
   return ctx;
 }
 
+const SALES_PATH = /sale|purchase|royalt|report|analy|order|earning|revenue/i;
+
+function hasArray(payload: unknown, depth = 3): boolean {
+  if (Array.isArray(payload)) return true;
+  if (!payload || typeof payload !== 'object' || depth === 0) return false;
+  return Object.values(payload).some((v) => hasArray(v, depth - 1));
+}
+
+/**
+ * A sales report that happens to be empty (no sales yet today) still teaches
+ * Loupe how to ask for sales. It's kept as a candidate with 0 rows and
+ * verified later with a wider date range.
+ */
+function isSalesCandidate(c: Capture, dates: DateSlot[]): boolean {
+  let path = '';
+  try {
+    path = new URL(c.url).pathname;
+  } catch {
+    return false;
+  }
+  return dates.length > 0 && SALES_PATH.test(`${path} ${c.body ?? ''}`) && hasArray(c.payload);
+}
+
 export function learn(c: Capture): Learned {
   const { rows, dated } = normalizeSales(c.payload, c.url, requestContext(c));
   const items = rows.length ? [] : normalizeCatalog(c.payload, c.at);
   const account = accountFacts(c.payload, c.at);
-  const kind: Learned['kind'] = rows.length ? 'sales' : items.length ? 'catalog' : 'none';
+  let kind: Learned['kind'] = rows.length ? 'sales' : items.length ? 'catalog' : 'none';
   let template: Template | null = null;
-  if (kind !== 'none' && c.status < 400 && isSafeToReplay(c.method, c.url)) {
+  if (c.status < 400 && isSafeToReplay(c.method, c.url, c.body)) {
     const bodyType = bodyTypeOf(c.headers, c.body);
     const list = leaves(c.url, c.body, bodyType);
     const dates = detectDates(list);
+    if (kind === 'none' && isSalesCandidate(c, dates)) kind = 'sales';
+    if (kind === 'none') return { kind, rows, dated, items, account, template };
     const { markets, all } = detectMarkets(list);
     const token = findKey(c.payload, TOKEN_RESPONSE_KEYS);
     template = {
@@ -383,10 +410,33 @@ export function learn(c: Capture): Learned {
   return { kind, rows, dated, items, account, template };
 }
 
-/** Better templates first: dated rows, a date range, then the most recent. */
+/** Better templates first: proven rows, dated rows, a date range or paging, then the most recent. */
 export function rankTemplates(list: Template[]): Template[] {
-  const score = (t: Template) => (t.dated ? 4 : 0) + (t.dates.length ? 2 : 0) + (t.pages.length || t.tokenKey ? 1 : 0);
+  const score = (t: Template) =>
+    (t.rows > 0 ? 8 : 0) + (t.dated ? 4 : 0) + (t.dates.length ? 2 : 0) + (canPage(t) ? 2 : 0) + (t.rows >= 50 ? 1 : 0);
   return [...list].sort((a, b) => score(b) - score(a) || b.rows - a.rows || b.capturedAt - a.capturedAt);
+}
+
+function canPage(t: Template): boolean {
+  return t.tokenKey !== null || t.pages.some((p) => p.role === 'page' || p.role === 'offset' || p.role === 'token');
+}
+
+/** A sales request Loupe can move through time, and that has returned sales. */
+export function isStrongSales(t: Template | null | undefined): boolean {
+  return Boolean(t && t.kind === 'sales' && t.window && t.rows > 0);
+}
+
+/** A sales request with a date range that returned nothing yet: worth verifying with a wider range. */
+export function isUnverifiedSales(t: Template | null | undefined): boolean {
+  return Boolean(t && t.kind === 'sales' && t.window && t.rows === 0);
+}
+
+/**
+ * A product list Loupe can read in full: it pages, or it already returned a
+ * lot. A dashboard widget showing your 10 newest products is not a catalog.
+ */
+export function isStrongCatalog(t: Template | null | undefined): boolean {
+  return Boolean(t && t.kind === 'catalog' && (canPage(t) || t.rows >= 50));
 }
 
 // ---------- building new requests ----------

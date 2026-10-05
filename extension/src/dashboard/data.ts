@@ -6,7 +6,7 @@ import { getAll } from '../shared/db';
 import type { Template } from '../shared/learn';
 import { withDefaults, type Settings } from '../shared/settings';
 import type { Meta } from '../shared/storage';
-import type { AccountFacts, CaptureLogEntry, CatalogItem, ListingDraft, NicheResult, RangeTotal, SaleRow, StoredProduct, SyncState } from '../shared/types';
+import type { AccountFacts, CaptureLogEntry, CatalogItem, ListingDraft, NicheResult, RangeTotal, SaleRow, StoredProduct, SyncDebug, SyncState } from '../shared/types';
 
 export interface Data {
   ready: boolean;
@@ -21,6 +21,7 @@ export interface Data {
   captureLog: CaptureLogEntry[];
   templates: Template[];
   syncState: SyncState;
+  syncDebug: SyncDebug | null;
   account: AccountFacts | null;
   agentDismissed: string[];
   /** Bumps whenever sales, catalog or totals change, for memoization. */
@@ -42,6 +43,7 @@ async function loadStorage(): Promise<StoragePart> {
     captureLog: pick<CaptureLogEntry[]>('captureLog', []),
     templates: pick<Template[]>('templates', []),
     syncState: pick<SyncState>('syncState', { status: 'idle', mode: 'quick', phase: '' }),
+    syncDebug: pick<SyncDebug | null>('syncDebug', null),
     account: pick<AccountFacts | null>('account', null),
     agentDismissed: pick<string[]>('agentDismissed', []),
   };

@@ -273,8 +273,9 @@ export function Settings({ data, route }: { data: Data; route: Route }) {
 
       <Card title={<h2 id="s-diagnostics">Sync diagnostics</h2>} actions={<CopyReport data={data} />}>
         <p class="hint" style={{ marginBottom: '10px' }}>
-          Merch on Demand has no public API. Loupe learns from the requests Merch's own pages make while you're signed in, then repeats them for other dates,
-          marketplaces and pages. This lists what it saw. The sync report describes these requests without any values, titles or personal data.
+          Merch on Demand has no public API. Loupe works in a Merch tab with your signed-in session: it tries the endpoints Merch serves your data from, reads
+          Merch's own scripts for the rest, and learns from the requests Merch's pages make, then repeats them for every date range, marketplace and page.
+          The sync report lists what it tried and saw, without any values, titles or personal data.
         </p>
         {data.templates.length > 0 && (
           <div class="table-wrap" style={{ marginBottom: '12px' }}>

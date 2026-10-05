@@ -1,8 +1,8 @@
-// Service worker: the single writer for sales and catalog data, the sync
-// orchestrator, notifications, the toolbar badge, scheduled refreshes and
-// context menus.
+// Service worker: the single writer for sales and catalog data, home of the
+// sync engine (sync.ts), notifications, the toolbar badge, scheduled
+// refreshes and context menus.
 
-import { bump, clearStore, count, getAll, getMany, putMany, salesBetween, type Keyed } from '../shared/db';
+import { bump, clearStore, count, deleteMany, getAll, getMany, putMany, salesBetween, type Keyed } from '../shared/db';
 import { addDays, localDay, pacificDay } from '../shared/dates';
 import * as fmt from '../shared/format';
 import { rankTemplates, type Template } from '../shared/learn';
@@ -11,7 +11,8 @@ import { MARKETPLACES, merchSearchUrl } from '../shared/marketplaces';
 import { PRODUCT_TYPES } from '../shared/products';
 import { mergeSales, rowKey } from '../shared/sales';
 import { get, getSettings, productKey, pruneProducts, saveProduct, set, allProducts, update } from '../shared/storage';
-import type { AccountFacts, CaptureLogEntry, CatalogItem, ProductData, RangeTotal, SaleRow, SyncMode, SyncState } from '../shared/types';
+import type { AccountFacts, CaptureLogEntry, CatalogItem, ProductData, RangeTotal, SaleRow } from '../shared/types';
+import { MERCH, configureSync, onTabUpdated, startSync, stopSync, syncActive, watchdog } from './sync';
 
 // ---------- Serialized writes ----------
 
@@ -84,25 +85,39 @@ async function ingestTotals(totals: RangeTotal[]) {
   });
 }
 
+/** Items without a known marketplace (from widgets and summaries) are placeholders until the real listing arrives. */
+const partial = (key: string) => key.startsWith('XX:') || key.startsWith('id:');
+
 async function ingestCatalog(items: CatalogItem[]) {
   return serial(async () => {
     await leaveDemo();
-    const existing = await getMany('catalog', items.map((i) => i.key));
-    const merged = items.map((i) => {
-      const prev = existing.get(i.key);
+    const all = await getAll('catalog');
+    const knownAsins = new Set(all.filter((i) => !partial(i.key) && i.asin).map((i) => i.asin));
+    for (const i of items) if (!partial(i.key) && i.asin) knownAsins.add(i.asin);
+    // A widget's copy of a product Loupe already has in full adds nothing.
+    const incoming = items.filter((i) => !(partial(i.key) && i.asin && knownAsins.has(i.asin)));
+    const byKey = new Map(all.map((i) => [i.key, i]));
+    const merged = incoming.map((i) => {
+      const prev = byKey.get(i.key);
       return prev ? { ...prev, ...i, createdAt: i.createdAt ?? prev.createdAt, image: i.image ?? prev.image, designId: i.designId ?? prev.designId } : i;
     });
+    // ...and the full listing replaces the placeholder.
+    const replaced = all.filter((i) => partial(i.key) && i.asin && knownAsins.has(i.asin)).map((i) => i.key);
     await putMany('catalog', merged);
-    await bump('catalog');
+    await deleteMany('catalog', replaced);
+    if (merged.length || replaced.length) await bump('catalog');
   });
 }
 
-/** After a complete catalog read, live listings that weren't returned are no longer live. */
+/** After a complete catalog read: live listings that weren't returned are no longer live, and placeholders go. */
 async function catalogComplete(startedAt: number) {
   return serial(async () => {
-    const stale = (await getAll('catalog')).filter((i) => i.seenAt < startedAt && i.status === 'live');
-    if (!stale.length) return;
-    await putMany('catalog', stale.map((i) => ({ ...i, status: 'removed' as const, rawStatus: 'not listed' })));
+    const stale = (await getAll('catalog')).filter((i) => i.seenAt < startedAt);
+    const placeholders = stale.filter((i) => partial(i.key)).map((i) => i.key);
+    const gone = stale.filter((i) => !partial(i.key) && i.status === 'live');
+    if (!placeholders.length && !gone.length) return;
+    await putMany('catalog', gone.map((i) => ({ ...i, status: 'removed' as const, rawStatus: 'not listed' })));
+    await deleteMany('catalog', placeholders);
     await bump('catalog');
   });
 }
@@ -159,10 +174,7 @@ async function saveTemplate(template: Template, tabId?: number) {
     return !hadSales && template.kind === 'sales';
   });
   // The first time Loupe learns the sales report, download the history right away.
-  if (firstSales && tabId !== undefined) {
-    const s = await get('syncState');
-    if (s.status !== 'running') await startSync('full', false, tabId);
-  }
+  if (firstSales && tabId !== undefined && !syncActive()) await startSync('full', false, tabId);
 }
 
 async function logCapture(entry: CaptureLogEntry) {
@@ -173,92 +185,19 @@ async function logCapture(entry: CaptureLogEntry) {
   });
 }
 
-// ---------- Sync orchestration ----------
+// ---------- Sync ----------
 
-const MERCH_HOME = 'https://merch.amazon.com/dashboard';
+configureSync({ ingestSales, ingestTotals, ingestCatalog, catalogComplete, mergeAccount, saveTemplate: (t) => saveTemplate(t), refreshBadge });
 
-async function setSync(patch: Partial<SyncState>) {
-  await update('syncState', (s) => ({ ...s, ...patch }));
-}
+const MERCH_HOME = `${MERCH}/dashboard`;
 
-async function startSync(mode: SyncMode, interactive: boolean, preferTab?: number): Promise<Record<string, unknown>> {
-  const current = await get('syncState');
-  if (current.status === 'running' && Date.now() - (current.startedAt ?? 0) < 20 * 60_000) {
-    if (interactive && current.tabId !== undefined) await chrome.tabs.update(current.tabId, { active: true }).catch(() => undefined);
-    return { running: true };
-  }
-  const [templates, settings] = await Promise.all([get('templates'), getSettings()]);
-  const connected = templates.some((t) => t.kind === 'sales') || templates.some((t) => t.kind === 'catalog');
-  if (!connected && !interactive && preferTab === undefined) return { needsConnect: true };
-  const effective: SyncMode = connected ? mode : 'connect';
-
-  let tabId = preferTab;
-  let opened = false;
-  if (tabId === undefined && effective !== 'connect') {
-    const tabs = await chrome.tabs.query({ url: 'https://merch.amazon.com/*' });
-    tabId = tabs.find((t) => t.id !== undefined && t.status === 'complete' && !t.discarded)?.id;
-  }
-  if (tabId !== undefined) {
-    await set('syncState', { status: 'running', mode: effective, phase: 'Starting…', tabId, openedTab: false, startedAt: Date.now(), visited: [] });
-    const ok = await chrome.tabs.sendMessage(tabId, { type: 'sync:run', mode: effective } satisfies Message).then(() => true, () => false);
-    if (ok) return { started: true, tabId };
-  }
-  if (!interactive && !settings.backgroundTabSync) {
-    await setSync({ status: 'idle', phase: 'Open Merch on Demand to sync.' });
-    return { needsTab: true };
-  }
-  const tab = await chrome.tabs.create({ url: MERCH_HOME, active: interactive });
-  opened = true;
-  await set('syncState', { status: 'running', mode: effective, phase: 'Opening Merch on Demand…', tabId: tab.id, openedTab: opened, startedAt: Date.now(), visited: [] });
-  return { started: true, tabId: tab.id, opened };
-}
-
-async function finishSync() {
-  const s = await get('syncState');
-  if (s.status === 'done' || s.status === 'partial') await update('meta', (m) => ({ ...m, lastCaptureAt: Date.now() }));
-  await refreshBadge();
-  if (s.openedTab && s.tabId !== undefined && s.mode !== 'connect' && s.status !== 'signin') {
-    const tab = await chrome.tabs.get(s.tabId).catch(() => null);
-    if (tab && !tab.active) setTimeout(() => void chrome.tabs.remove(s.tabId!).catch(() => undefined), 1500);
-  }
-}
-
-const SIGN_IN = /\/ap\/(?:signin|mfa|cvf)|signin/i;
-
-chrome.tabs.onUpdated.addListener(async (tabId, change) => {
-  if (!change.url || !SIGN_IN.test(change.url)) return;
-  const s = await get('syncState');
-  if (s.status !== 'running' || s.tabId !== tabId) return;
-  // Merch signs you in by bouncing through Amazon's sign-in page and straight
-  // back, even when you're already signed in. Only a tab that stays there
-  // really needs you.
-  await new Promise((r) => setTimeout(r, 8000));
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
-  const now = await get('syncState');
-  if (!tab?.url || !SIGN_IN.test(tab.url) || now.status !== 'running' || now.tabId !== tabId) return;
-  await setSync({ status: 'signin', phase: 'Sign in to Merch on Demand in the Loupe tab, then sync again.', finishedAt: Date.now() });
-  if (s.mode === 'connect' || s.openedTab) await chrome.tabs.update(tabId, { active: true }).catch(() => undefined);
-  else {
-    chrome.notifications.create('signin', {
-      type: 'basic', iconUrl: 'icons/icon128.png', title: 'Loupe needs you to sign in',
-      message: 'Merch on Demand signed you out. Sign in and Loupe will keep syncing.', priority: 1,
-    });
-  }
-});
-
-chrome.tabs.onRemoved.addListener(async (tabId) => {
-  const s = await get('syncState');
-  if (s.status === 'running' && s.tabId === tabId) {
-    await setSync({ status: 'error', phase: 'The sync tab was closed before Loupe finished.', finishedAt: Date.now() });
-  }
-});
+chrome.tabs.onUpdated.addListener((tabId, change, tab) => void onTabUpdated(tabId, change, tab));
 
 async function autoSync() {
   const [settings, meta, s] = await Promise.all([getSettings(), get('meta'), get('syncState')]);
-  if (s.status === 'running' && Date.now() - (s.startedAt ?? 0) > 20 * 60_000) {
-    await setSync({ status: 'error', phase: 'The sync took too long and was stopped.', finishedAt: Date.now() });
-  }
-  if (!settings.autoSync) return;
+  if (!settings.autoSync || syncActive()) return;
+  // Never connected: a first sync is the user's call.
+  if (!(await get('templates')).length) return;
   // Signed out: don't keep opening Merch every half hour. Try again in a few hours.
   if (s.status === 'signin' && Date.now() - (s.finishedAt ?? 0) < 6 * 3600_000) return;
   const catalogStale = Date.now() - (meta.coverage?.catalogAt ?? 0) > 24 * 3600_000;
@@ -327,6 +266,7 @@ async function scheduleAlarms() {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'watchlist') void refreshWatchlist();
   else if (alarm.name === 'autosync') void autoSync();
+  else if (alarm.name === 'syncwatch') void watchdog();
   else if (alarm.name === 'badge') void refreshBadge();
   else if (alarm.name === 'maintenance') void pruneProducts(30);
 });
@@ -393,14 +333,7 @@ chrome.runtime.onMessage.addListener((message: Message & { target?: string }, se
     case 'template:save': return reply(saveTemplate(message.template, sender.tab?.id));
     case 'capture:log': return reply(logCapture(message.entry));
     case 'sync:start': return reply(startSync(message.mode, message.interactive));
-    case 'sync:whoami':
-      return reply(
-        get('syncState').then((s) => ({
-          run: s.status === 'running' && s.tabId !== undefined && s.tabId === sender.tab?.id && sender.frameId === 0,
-          mode: s.mode,
-        })),
-      );
-    case 'sync:done': return reply(finishSync());
+    case 'sync:stop': return reply(stopSync().then(() => ({ stopping: true })));
     case 'watchlist:refresh': return reply(refreshWatchlist(message.keys));
     case 'settings:changed': return reply(Promise.all([scheduleAlarms(), refreshBadge()]));
     case 'badge:refresh': return reply(refreshBadge());
@@ -417,9 +350,16 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   createMenus();
   await scheduleAlarms();
   await refreshBadge();
+  await endStaleSync();
   if (details.reason === chrome.runtime.OnInstalledReason.INSTALL) await openDashboard('welcome');
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  void migrate().then(() => Promise.all([scheduleAlarms(), refreshBadge()]));
+  void migrate().then(() => Promise.all([scheduleAlarms(), refreshBadge(), endStaleSync()]));
 });
+
+/** A sync that was running when the browser closed is over. */
+async function endStaleSync() {
+  const s = await get('syncState');
+  if (s.status === 'running' && !syncActive()) await set('syncState', { ...s, status: 'idle', phase: 'The last sync was interrupted when the browser closed.', finishedAt: Date.now() });
+}

@@ -1,9 +1,9 @@
 // Isolated-world script on merch.amazon.com.
 //  - Every frame: receives what Merch's pages load (from main-world.ts),
 //    learns templates and sends sales, products and account facts to the
-//    background worker.
-//  - Top frame: runs syncs the background worker asks for, shows sync
-//    progress, and adds the listing tools dock on the create page.
+//    background worker, which runs syncs (background/sync.ts).
+//  - Top frame: shows sync progress and adds the listing tools dock on the
+//    create page.
 
 import { useEffect, useState } from 'preact/hooks';
 import * as fmt from '../../shared/format';
@@ -18,7 +18,6 @@ import { mount } from '../shared/mount';
 import { Emitter, useEmitter } from '../shared/store';
 import { BASE_CSS } from '../shared/styles';
 import { bulletsToDescription, fillListing, findAndReplace, findListingFields, type ListingField } from './fields';
-import { rememberHeaders, runSync } from './sync';
 
 const isTop = window.top === window;
 const send = (m: Message) => chrome.runtime.sendMessage(m).catch(() => undefined);
@@ -48,7 +47,6 @@ function handleCapture(data: RawCapture) {
   const capture: Capture = {
     url: data.url, method: data.method, status: data.status, headers: data.reqHeaders ?? {}, body: data.reqBody, payload, at: Date.now(),
   };
-  rememberHeaders(capture.headers);
   const learned = learn(capture);
   void send({
     type: 'capture:log',
@@ -202,7 +200,12 @@ function SyncBanner() {
       {s.status === 'running' && (
         <div class={`bar ${pct === null ? 'indeterminate' : ''}`}><div style={pct === null ? undefined : { width: `${pct}%` }} /></div>
       )}
-      {s.status === 'running' && <div class="sub">Keep this tab open. You can keep working in other tabs.</div>}
+      {s.status === 'running' && (
+        <div class="row">
+          <span class="sub grow">Loupe works in the background. You can keep using Merch.</span>
+          <button class="btn sm" onClick={() => void send({ type: 'sync:stop' })}>Stop</button>
+        </div>
+      )}
       {s.error && s.status !== 'running' && <div class="sub">{s.error}</div>}
     </div>
   );
@@ -365,10 +368,7 @@ async function boot() {
   });
 
   chrome.runtime.onMessage.addListener((message: Message, _sender, respond) => {
-    if (message.type === 'sync:run') {
-      void get('syncState').then((s) => runSync(message.mode, s));
-      respond({ ok: true });
-    } else if (message.type === 'listing:fill') {
+    if (message.type === 'listing:fill') {
       state.scanFields();
       const filled = fillListing(state.fields, message.draft, message.overwrite);
       state.checkTrademarks();
@@ -391,10 +391,6 @@ async function boot() {
     clearTimeout(timer);
     timer = window.setTimeout(() => state.checkTrademarks(), 400);
   }, true);
-
-  // Resume a sync that navigated to this page.
-  const who = (await chrome.runtime.sendMessage({ type: 'sync:whoami' } satisfies Message).catch(() => null)) as { run?: boolean; mode?: SyncState['mode'] } | null;
-  if (who?.run && who.mode) void runSync(who.mode, await get('syncState'));
 }
 
 if (isTop) void boot();

@@ -29,8 +29,6 @@ export interface Settings {
   backgroundTabSync: boolean;
   /** Days of daily sales history to download on connect. */
   historyDays: number;
-  /** Average pause between sync requests, in ms. */
-  syncDelayMs: number;
   /** Your Merch tier (live design limit); detected when Merch reports it. */
   tier: number | null;
   notifications: boolean;
@@ -68,7 +66,6 @@ export const DEFAULT_SETTINGS: Settings = {
   syncMinutes: 30,
   backgroundTabSync: true,
   historyDays: 400,
-  syncDelayMs: 450,
   tier: null,
   notifications: true,
   badge: true,

@@ -32,6 +32,7 @@
     "contextMenus",
     "notifications",
     "offscreen",
+    "scripting",
     "storage",
     "unlimitedStorage"
   ],
@@ -44,6 +45,8 @@
     "https://www.amazon.es/*",
     "https://www.amazon.co.jp/*",
     "https://merch.amazon.com/*",
+    "https://*.media-amazon.com/*",
+    "https://*.ssl-images-amazon.com/*",
     "https://completion.amazon.com/*",
     "https://completion.amazon.co.uk/*",
     "https://completion.amazon.de/*",

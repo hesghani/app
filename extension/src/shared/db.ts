@@ -96,6 +96,15 @@ export async function putMany<S extends StoreName>(store: S, items: Array<Record
   await done(tx);
 }
 
+export async function deleteMany(store: StoreName, keys: string[]): Promise<void> {
+  if (!keys.length) return;
+  const db = await openDb();
+  const tx = db.transaction(store, 'readwrite');
+  const os = tx.objectStore(store);
+  for (const key of keys) os.delete(key);
+  await done(tx);
+}
+
 export async function clearStore(store: StoreName): Promise<void> {
   const db = await openDb();
   const tx = db.transaction(store, 'readwrite');

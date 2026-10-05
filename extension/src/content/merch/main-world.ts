@@ -1,7 +1,9 @@
 // Runs in the page's own JavaScript world on merch.amazon.com (every frame),
 // before Merch's scripts. It observes the data Merch's pages load with your
-// signed-in session (fetch and XHR, any amazon.com API host) and hands a copy,
-// with the request that produced it, to Loupe's isolated content script.
+// signed-in session (fetch and XHR, whatever host Merch's API lives on) and
+// hands a copy, with the request that produced it, to Loupe's isolated
+// content script. It also remembers the anti-forgery headers Merch sends, so
+// Loupe's own requests from this tab look exactly like Merch's.
 // Nothing is modified and nothing leaves the browser.
 
 (() => {
@@ -10,15 +12,19 @@
   if (w[FLAG]) return;
   w[FLAG] = true;
 
-  const MAX_CHARS = 12 * 1024 * 1024;
+  const MAX_CHARS = 20 * 1024 * 1024;
   const origin = location.origin;
-  const TELEMETRY = /^(?:fls-|unagi|aax|aan\.|aws-?metrics|metrics|csm|sentry)/i;
+  const TELEMETRY = /^(?:fls-|unagi|aax|aan\.|aws-?metrics|metrics|csm|sentry|rum|dataplane|cognito|.*\.google|.*doubleclick)/i;
+  const tokens: Record<string, string> = {};
+  Object.defineProperty(w, '__loupeTokens', { value: tokens, enumerable: false });
+  const rememberTokens = (headers: Record<string, string>) => {
+    for (const [k, v] of Object.entries(headers)) if (/csrf|xsrf|anti-?forgery|a2z|x-requested-with/i.test(k) && v.length < 2048) tokens[k] = v;
+  };
 
   const eligible = (raw: string): string | null => {
     try {
       const u = new URL(raw, location.href);
       if (u.protocol !== 'https:') return null;
-      if (!/(^|\.)amazon\.(?:com|co\.uk|de|fr|it|es|co\.jp)$/.test(u.hostname)) return null;
       if (TELEMETRY.test(u.hostname)) return null;
       if (/\.(?:js|css|png|jpe?g|gif|svg|webp|woff2?|ico|map|html?)$/i.test(u.pathname)) return null;
       return u.href;
@@ -69,6 +75,7 @@
 
   // ---- fetch ----
   const originalFetch = window.fetch;
+  Object.defineProperty(w, '__loupeRawFetch', { value: originalFetch.bind(window), enumerable: false });
   window.fetch = async function patchedFetch(this: unknown, input: RequestInfo | URL, init?: RequestInit) {
     let reqBody: string | undefined;
     const isRequest = typeof Request !== 'undefined' && input instanceof Request;
@@ -88,6 +95,7 @@
       if (url && length <= MAX_CHARS && !/image|font|javascript|css|html/i.test(response.headers.get('content-type') ?? '')) {
         const method = (init?.method ?? (isRequest ? (input as Request).method : 'GET')).toUpperCase();
         const headers = headersToObject(init?.headers ?? (isRequest ? (input as Request).headers : undefined));
+        rememberTokens(headers);
         response
           .clone()
           .text()
@@ -123,6 +131,7 @@
   proto.send = function (this: XMLHttpRequest & Tracked, body?: Document | XMLHttpRequestBodyInit | null) {
     const meta = this.__loupe;
     const url = meta ? eligible(meta.url) : null;
+    if (meta) rememberTokens(meta.headers);
     if (meta && url) {
       const reqBody = bodyText(body);
       this.addEventListener('load', () => {
