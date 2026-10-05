@@ -138,7 +138,7 @@ export function createMerch(style = 'A') {
     }
   });
   const listings = products.flatMap((p) => p.listings.map((l) => ({ ...l, product: p })));
-  const state = { extraToday: 0, apiCalls: 0, forbidden: 0 };
+  const state = { extraToday: 0, apiCalls: 0, forbidden: 0, ssoBounced: false };
 
   function units(product, mp, day) {
     const ago = daysBetween(day, today);
@@ -258,6 +258,15 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
   async function handle(route) {
     const req = route.request();
     const url = new URL(req.url());
+    // Like the real site, the first visit bounces through Amazon's sign-in
+    // page and straight back, even for a signed-in user.
+    if (url.pathname === '/dashboard' && !url.searchParams.has('openid.assoc_handle') && !state.ssoBounced) {
+      state.ssoBounced = true;
+      const back = 'https://merch.amazon.com/dashboard?openid.assoc_handle=amzn_gear_us&openid.mode=id_res';
+      // (A script redirect: Playwright doesn't intercept redirects its own fake responses issue.)
+      const signin = `https://www.amazon.com/ap/signin?openid.return_to=${encodeURIComponent(back)}`;
+      return route.fulfill({ contentType: 'text/html', body: `<html><body><script>location.replace(${JSON.stringify(signin)})</script></body></html>` });
+    }
     if (url.pathname.startsWith('/api/')) {
       const res = api(req.method(), url, req.postData(), await req.allHeaders());
       return route.fulfill({ status: res.status ?? 200, contentType: 'application/json;charset=UTF-8', body: JSON.stringify(res.json) });

@@ -48,13 +48,23 @@ async function launch(style) {
     ...(executablePath ? { executablePath } : { channel: 'chromium' }),
     headless: true,
     viewport: { width: 1360, height: 900 },
-    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`],
+    args: [
+      `--disable-extensions-except=${dist}`,
+      `--load-extension=${dist}`,
+      // Nothing may reach the real Amazon: anything the stand-in sites don't
+      // intercept fails instead (on CI it would otherwise hit a real sign-in page).
+      '--host-resolver-rules=MAP *.amazon.com 127.0.0.1, MAP amazon.com 127.0.0.1',
+    ],
   });
   const merch = createMerch(style);
   const counters = { productRequests: 0 };
   await context.route(/https:\/\/www\.amazon\.com\/.*/, (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === '/s') return route.fulfill({ contentType: 'text/html', body: searchPage(url.searchParams.get('k') ?? '') });
+    if (url.pathname === '/ap/signin') {
+      // A signed-in session: Amazon sends you straight back after a moment.
+      return route.fulfill({ contentType: 'text/html', body: `<html><body>Signing in…<script>setTimeout(() => location.replace(new URLSearchParams(location.search).get('openid.return_to')), 400)</script></body></html>` });
+    }
     const asin = url.pathname.match(/\/dp\/([A-Z0-9]{10})/)?.[1];
     if (asin) {
       counters.productRequests += 1;
@@ -201,6 +211,7 @@ console.log('Scenario A: research overlays, connect (GET + epoch dates, POST + t
       assert.ok(oldest <= (await storage(dash, 'meta')).coverage.salesFrom, 'history reaches the configured start');
       assert.equal(merch.state.forbidden, 0, 'every replayed request carried the anti-forgery header');
       assert.equal((await storage(dash, 'account')).tier, 1000);
+      assert.ok(merch.state.ssoBounced, 'the sign-in bounce happened and the sync carried on');
       merchTab = context.pages().find((p) => p.url().startsWith('https://merch.amazon.com/'));
       await merchTab.waitForFunction(() => document.querySelector('loupe-dock')?.shadowRoot?.textContent?.includes('Loupe is connected'));
       await merchTab.screenshot({ path: join(out, 'connected.png') });

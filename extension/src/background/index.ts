@@ -223,19 +223,26 @@ async function finishSync() {
   }
 }
 
+const SIGN_IN = /\/ap\/(?:signin|mfa|cvf)|signin/i;
+
 chrome.tabs.onUpdated.addListener(async (tabId, change) => {
-  if (!change.url) return;
+  if (!change.url || !SIGN_IN.test(change.url)) return;
   const s = await get('syncState');
   if (s.status !== 'running' || s.tabId !== tabId) return;
-  if (/\/ap\/(?:signin|mfa|cvf)|signin/i.test(change.url)) {
-    await setSync({ status: 'signin', phase: 'Sign in to Merch on Demand in the Loupe tab, then sync again.', finishedAt: Date.now() });
-    if (s.mode === 'connect' || s.openedTab) await chrome.tabs.update(tabId, { active: true }).catch(() => undefined);
-    else {
-      chrome.notifications.create('signin', {
-        type: 'basic', iconUrl: 'icons/icon128.png', title: 'Loupe needs you to sign in',
-        message: 'Merch on Demand signed you out. Sign in and Loupe will keep syncing.', priority: 1,
-      });
-    }
+  // Merch signs you in by bouncing through Amazon's sign-in page and straight
+  // back, even when you're already signed in. Only a tab that stays there
+  // really needs you.
+  await new Promise((r) => setTimeout(r, 8000));
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const now = await get('syncState');
+  if (!tab?.url || !SIGN_IN.test(tab.url) || now.status !== 'running' || now.tabId !== tabId) return;
+  await setSync({ status: 'signin', phase: 'Sign in to Merch on Demand in the Loupe tab, then sync again.', finishedAt: Date.now() });
+  if (s.mode === 'connect' || s.openedTab) await chrome.tabs.update(tabId, { active: true }).catch(() => undefined);
+  else {
+    chrome.notifications.create('signin', {
+      type: 'basic', iconUrl: 'icons/icon128.png', title: 'Loupe needs you to sign in',
+      message: 'Merch on Demand signed you out. Sign in and Loupe will keep syncing.', priority: 1,
+    });
   }
 });
 
