@@ -432,4 +432,54 @@ console.log('Scenario C: hostile Merch (API on another host, 10-product widget, 
   }
 }
 
+// ---------------------------------------------------------------------------
+console.log("Scenario D: Merch's real API (FindListings search-after paging, range-total reports, rate limiter)");
+{
+  const { context, merch, ext, close } = await launch('D');
+  try {
+    const dash = await until(() => context.pages().find((p) => p.url().includes('dashboard.html')), { timeout: 5000, message: 'welcome tab' });
+    await step('connect reads every listing with its status, sales history and the tier', async () => {
+      await dash.goto(ext('dashboard.html#overview'));
+      await dash.waitForSelector('text=Connect Merch account');
+      const s = await connect(dash, 'Connect Merch account');
+      assert.equal(s.status, 'done', `sync finished as ${s.status}: ${s.phase} ${s.error ?? ''}`);
+      assert.ok(s.seconds < 60, `connect took ${s.seconds} s`);
+      const catalog = await dbAll(dash, 'catalog');
+      assert.equal(catalog.length, merch.listings.length, `every listing, not the 10 on the dashboard (${catalog.length})`);
+      assert.ok(catalog.every((i) => i.key.startsWith('L:')), 'keyed by Merch listing id');
+      const by = (st) => catalog.filter((i) => i.status === st).length;
+      assert.equal(by('processing'), 2, 'PUBLISHING and PROPAGATED are in progress');
+      assert.equal(by('rejected'), 1);
+      assert.equal(by('live'), merch.listings.length - 3);
+      assert.ok(catalog.some((i) => i.status === 'processing' && i.asin === null), 'a listing still publishing has no ASIN yet');
+      const templates = await storage(dash, 'templates');
+      const sales = templates.find((t) => t.kind === 'sales' && t.rows > 0);
+      assert.ok(sales && !sales.dated, 'sales come from a range-total report');
+      const rows = await dbAll(dash, 'sales');
+      const days = new Set(rows.map((r) => r.date));
+      assert.ok(days.size >= 80, `daily history over ~90 days (${days.size} days)`);
+      assert.ok(rows.some((r) => r.marketplace === 'DE' && r.currency === 'EUR'), 'German sales in euros');
+      const totals = await dbAll(dash, 'totals');
+      assert.ok(totals.some((t) => t.days === 365), '365-day totals per product');
+      assert.equal((await storage(dash, 'account')).tier, 1000, 'tier from the rate limiter');
+      assert.equal(merch.state.forbidden, 0, 'every request carried X-CSRF-Token');
+    });
+
+    await step('the next full sync reaches further back in history', async () => {
+      const before = (await storage(dash, 'meta')).coverage.salesFrom;
+      const started = (await storage(dash, 'syncState')).startedAt;
+      await dash.evaluate(() => chrome.runtime.sendMessage({ type: 'sync:start', mode: 'full', interactive: false }));
+      const s = await until(async () => {
+        const s = await storage(dash, 'syncState');
+        return s.startedAt > started && s.status !== 'running' ? s : null;
+      }, { timeout: 90000, message: 'second full sync' });
+      assert.equal(s.status, 'done', `${s.phase} ${s.error ?? ''}`);
+      const after = (await storage(dash, 'meta')).coverage.salesFrom;
+      assert.ok(after < before, `history extended from ${before} to ${after}`);
+    });
+  } finally {
+    await close();
+  }
+}
+
 console.log(`\nAll e2e checks passed. Screenshots in ${out}`);

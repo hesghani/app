@@ -20,6 +20,7 @@ import {
   chunks,
   describeRequest,
   describeShape,
+  isCatalogSource,
   isStrongCatalog,
   isStrongSales,
   learn,
@@ -290,7 +291,7 @@ async function templates(): Promise<{ sales: Template | null; catalog: Template 
   const list = await get('templates');
   return {
     sales: rankTemplates(list.filter((t) => t.kind === 'sales'))[0] ?? null,
-    catalog: rankTemplates(list.filter((t) => t.kind === 'catalog'))[0] ?? null,
+    catalog: rankTemplates(list.filter((t) => isCatalogSource(t)))[0] ?? null,
   };
 }
 
@@ -318,6 +319,7 @@ function knownProbes(today: string): Wire[] {
     `/merchandise/all?pageSize=100&pageNumber=1`,
     `/merchandise/list?pageSize=100&pageNumber=1`,
     `/api/merchandise/list?pageSize=100&pageNumber=1`,
+    `/api/ratelimiter/metadata`,
     `/accountSummary`,
     `/api/account/summary`,
   ];
@@ -611,31 +613,52 @@ async function downloadSales(run: Run, t: Template): Promise<number> {
     });
     await detail(run, `sales: ${rows.toLocaleString()} rows`);
   } else {
-    // Reports without per-day dates: one request per recent day, plus product totals for 30/90/365 days.
-    const days = quick ? 2 : Math.min(35, run.settings.historyDays);
-    coveredFrom = addDays(today, -(days - 1));
-    await note(run, 'Finding the marketplaces you sell in…');
-    const activeMarkets: Array<MarketplaceId | undefined> = [];
-    await pool(markets, 4, async (mp) => {
-      let found = 0;
-      for (const c of await salesRange(run, t, { from: addDays(today, -364), to: today, marketplace: mp }, false)) found += await ingestTotals(c, 365, today);
-      // Merch may cap the range: 90 days still tells whether this marketplace sells.
-      if (!found) for (const c of await salesRange(run, t, { from: addDays(today, -89), to: today, marketplace: mp }, false)) found += await ingestTotals(c, 90, today);
-      if (found > 0) activeMarkets.push(mp);
-    });
+    // Reports of totals per product for the requested range (Merch's
+    // purchases report): daily history comes from asking one day at a time,
+    // product totals from 30/90/365-day ranges.
+    const known = (meta.knownMarkets ?? []).filter((m): m is MarketplaceId => (MARKETPLACE_IDS as string[]).includes(m));
+    let activeMarkets: Array<MarketplaceId | undefined> = [];
+    if (quick && known.length) activeMarkets = markets[0] === undefined ? [undefined] : known;
+    else {
+      await note(run, 'Finding the marketplaces you sell in…');
+      await pool(markets, 4, async (mp) => {
+        let found = 0;
+        for (const c of await salesRange(run, t, { from: addDays(today, -364), to: today, marketplace: mp }, false)) found += await ingestTotals(c, 365, today);
+        // Merch may cap the range: 90 days still tells whether this marketplace sells.
+        if (!found) for (const c of await salesRange(run, t, { from: addDays(today, -89), to: today, marketplace: mp }, false)) found += await ingestTotals(c, 90, today);
+        if (found > 0) activeMarkets.push(mp);
+      });
+      await detail(run, `selling in ${activeMarkets.map((m) => m ?? 'all').join(', ') || 'no marketplace in the past year'}`);
+    }
+    // Days to read: the last week every time; a full sync also reaches 120 days
+    // further back (90 on the first one) until the whole history is covered.
+    const days = new Set<string>();
+    const recent = quick ? 2 : 7;
+    for (let i = 0; i < recent; i++) days.add(addDays(today, -i));
+    if (!quick) {
+      const reached = meta.coverage?.salesFrom && meta.coverage.salesFrom < addDays(today, -6) ? meta.coverage.salesFrom : null;
+      const start = reached ?? addDays(today, -6);
+      const target = addDays(start, -(reached ? 120 : 83));
+      const stop = target < historyFrom ? historyFrom : target;
+      for (let d = addDays(start, -1); d >= stop; d = addDays(d, -1)) days.add(d);
+      coveredFrom = stop < start ? stop : start;
+    } else coveredFrom = today;
+    const dayList = Array.from(days).sort().reverse();
     const plan = activeMarkets.flatMap((mp) => [
-      ...Array.from({ length: days }, (_, i) => ({ mp, from: addDays(today, -i), to: addDays(today, -i), window: 0 })),
+      ...dayList.map((day) => ({ mp, from: day, to: day, window: 0 })),
       ...(quick ? [] : [30, 90].map((w) => ({ mp, from: addDays(today, -(w - 1)), to: today, window: w }))),
     ]);
+    if (!quick) await note(run, `Downloading daily sales ${dayList[dayList.length - 1]} → ${today} in ${activeMarkets.length} marketplace${activeMarkets.length === 1 ? '' : 's'}…`);
     let done = 0;
-    await pool(plan, 4, async (step) => {
+    await pool(plan, 6, async (step) => {
       for (const c of await salesRange(run, t, { from: step.from, to: step.to, marketplace: step.mp }, false)) {
         if (step.window) await ingestTotals(c, step.window, today);
         else rows += (await ingest(c, false)).rows;
       }
       done += 1;
-      await progress(run, step.window ? `Reading ${step.window}-day totals` : `Downloading sales · ${step.from}${step.mp ? ` · ${step.mp}` : ''}`, done, plan.length);
+      await progress(run, step.window ? `Reading ${step.window}-day totals` : `Downloading sales · ${step.from}${step.mp ? ` · ${step.mp}` : ''} · ${rows.toLocaleString()} rows`, done, plan.length);
     });
+    await detail(run, `sales: ${rows.toLocaleString()} daily rows over ${dayList.length} days`);
   }
   if (!quick) {
     await update('meta', (m) => ({
@@ -648,7 +671,8 @@ async function downloadSales(run: Run, t: Template): Promise<number> {
 
 // ---------- catalog ----------
 
-async function downloadCatalog(run: Run, t: Template): Promise<{ items: number; complete: boolean }> {
+async function downloadCatalog(run: Run, template: Template): Promise<{ items: number; complete: boolean }> {
+  let t = template;
   const startedAt = Date.now();
   const seen = new Set<string>();
   const sizeSlot = t.pages.find((p) => p.role === 'size');
@@ -723,6 +747,11 @@ async function downloadCatalog(run: Run, t: Template): Promise<{ items: number; 
       current = d.capture;
       await progress(run, `Reading your products · ${seen.size.toLocaleString()} so far`, seen.size, seen.size + pageSize);
     }
+  }
+  // Paging worked with a token the template didn't know about: remember it, so this list counts as complete next time.
+  if (complete && !t.tokenKey && state.tokenName && seen.size > r0.got) {
+    t = { ...t, tokenKey: state.tokenName, rows: seen.size };
+    await hooks!.saveTemplate(t);
   }
   if (complete && isStrongCatalog(t)) await hooks!.catalogComplete(startedAt);
   await update('meta', (m) => ({ ...m, coverage: { ...(m.coverage ?? {}), catalogAt: Date.now() } }));
@@ -817,7 +846,9 @@ export async function watchdog() {
 
 async function finish(run: Run, failed: boolean) {
   await chrome.alarms.clear('syncwatch');
-  await set('syncDebug', run.debug);
+  // A routine sync that didn't need to look for anything keeps the last discovery's details.
+  const prev = await get('syncDebug');
+  if (run.debug.probes.length || run.debug.pages.length || !prev) await set('syncDebug', run.debug);
   if (!failed) await update('meta', (m) => ({ ...m, lastCaptureAt: Date.now() }));
   await hooks!.refreshBadge();
   const s = await get('syncState');

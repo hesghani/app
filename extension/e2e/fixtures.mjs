@@ -98,6 +98,12 @@ export function productPage(asin) {
 //      on another host (CORS), the dashboard shows a 10-product widget that
 //      isn't the catalog, Analyze first loads an empty "today" report,
 //      products page by cursor, and the account data is embedded in HTML.
+//   D: Merch's real API as a user's sync report showed it: products from the
+//      FindListings search service (POST, X-CSRF-Token, search-after
+//      pageToken pair, hitCount, status filter, page size capped at 100);
+//      sales from /api/reporting/purchases/report|records as totals per
+//      product for the requested range; an earnings report listing ASINs
+//      that is not the catalog; tier and counts from the rate limiter.
 // Every API call needs the anti-forgery header the page sets.
 
 const TZ = 'America/Los_Angeles';
@@ -207,10 +213,29 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
         .then((r) => r.json()).then((j) => { document.getElementById('out').textContent = j.items.length + ' shown'; });`),
   };
 
+  const FIND = '/api/ng-amazon/coral/com.amazon.merch.search.MerchSearchService/FindListings';
+  const STATUSES = ['DRAFT', 'PUBLISHING', 'UNDER_REVIEW', 'LIVE', 'PROPAGATED', 'REJECTED', 'REMOVED', 'TIMED_OUT', 'LOCKED'];
+  const findListings = (pageSize) => `fetch('${FIND}', { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-CSRF-Token': TOKEN, 'X-Requested-With': 'XMLHttpRequest' },
+        body: JSON.stringify({ pageSize: ${pageSize}, sortField: 'updatedDate', status: ${JSON.stringify(STATUSES)}, accountId: '4170000123', __type: 'com.amazon.merch.search#FindListingsRequest' }) })
+        .then((r) => r.json())`;
+  const D = {
+    dashboard: () => shell('Dashboard', '<h1>Dashboard</h1><div id="out">Loading…</div><div id="limits"></div>', `
+      fetch('/api/ratelimiter/metadata', { headers: { 'X-CSRF-Token': TOKEN } }).then((r) => r.json()).then((j) => { document.getElementById('limits').textContent = j.overallDesign.count + ' / ' + j.overallDesign.limit; });
+      ${findListings(10)}.then((j) => { document.getElementById('out').textContent = j.results.length + ' recent of ' + j.hitCount; });`),
+    designs: () => shell('Designs', '<h1>Designs</h1><div id="out">Loading…</div>', `
+      ${findListings(25)}.then((j) => { document.getElementById('out').textContent = j.results.length + ' of ' + j.hitCount; });`),
+  };
+  // Listing states as Merch reports them; a listing that's still publishing has no ASIN yet.
+  const dStatus = (l, i) => (l.product.status !== 'LIVE' ? l.product.status : i === 3 ? 'PUBLISHING' : i === 5 ? 'PROPAGATED' : 'LIVE');
+  const dListings = listings.map((l, i) => ({ ...l, status: dStatus(l, i), listingId: `${l.product.designId}-${l.product.type}-${l.mp}`.padEnd(48, '0').slice(0, 48), updated: Date.now() - i * 3600_000 }));
+
   const pages = style === 'C' ? {
     '/dashboard': C.dashboard,
     '/analyze': C.analyze,
     '/manage/designs': C.designs,
+  } : style === 'D' ? {
+    '/dashboard': D.dashboard,
+    '/manage/designs': D.designs,
   } : {
     '/dashboard': () => shell('Dashboard', '<h1>Dashboard</h1><div id="out">Loading…</div>', `
       fetch('/api/account/summary', { headers: { 'anti-csrftoken-a2z': TOKEN } }).then((r) => r.json()).then((j) => { document.getElementById('out').textContent = 'Tier ' + j.account.tier; });`),
@@ -244,7 +269,7 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
 
   function api(method, url, body, headers) {
     state.apiCalls += 1;
-    if (headers['anti-csrftoken-a2z'] !== TOKEN) {
+    if ((style === 'D' ? headers['x-csrf-token'] : headers['anti-csrftoken-a2z']) !== TOKEN) {
       state.forbidden += 1;
       return { status: 403, json: { message: 'Forbidden' } };
     }
@@ -253,10 +278,11 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
       A: ['/api/account/summary', '/api/reporting/purchases/records', '/api/products/search'],
       B: ['/api/account/summary', '/api/sales/report', '/api/manage/listings'],
       C: ['/v1/dashboard/recent-products', '/v1/analytics/sales', '/v1/catalog/listings'],
+      D: ['/api/ratelimiter/metadata', FIND, '/api/reporting/purchases/report', '/api/reporting/purchases/records', '/api/reporting/earnings/report'],
     }[style];
     if (!owned.includes(path)) return { status: 404, json: { message: 'Not found' } };
     if (path === '/api/account/summary') return { json: { account: { tier: 1000, dailyPublishLimit: 100, publishedToday: 4 } } };
-    if (path === '/api/reporting/purchases/records') {
+    if (path === '/api/reporting/purchases/records' && style === 'A') {
       const mp = Object.keys(MIDS).find((k) => MIDS[k] === url.searchParams.get('marketplaceId'));
       const from = zonedDay(Number(url.searchParams.get('fromDate')));
       const to = zonedDay(Number(url.searchParams.get('toDate')));
@@ -293,6 +319,50 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
       const size = Number(url.searchParams.get('pageSize') ?? 10);
       const slice = listings.slice((page - 1) * size, page * size);
       return { json: { totalCount: listings.length, items: slice.map((l) => ({ asin: l.asin, title: l.product.title, status: l.product.status === 'LIVE' ? 'Live' : 'Rejected', marketplace: `amazon.${l.mp === 'DE' ? 'de' : 'com'}`, productType: l.product.type, created: zonedMidnight(l.product.created) })) } };
+    }
+    // Style D: Merch's real API.
+    if (path === '/api/ratelimiter/metadata') {
+      return { json: { dailyProduct: { count: 4, limit: 100 }, overallProduct: { count: 5628, limit: 8000 }, overallDesign: { count: 984, limit: 1000 } } };
+    }
+    if (path === FIND) {
+      if (method !== 'POST') return { status: 405, json: { message: 'Method not allowed' } };
+      const b = JSON.parse(body);
+      if (b.pageSize > 100) return { status: 400, json: { __type: 'ValidationException', message: 'pageSize must be <= 100' } };
+      const pool = dListings.filter((l) => b.status.includes(l.status));
+      const start = b.pageToken ? pool.findIndex((l) => l.listingId === b.pageToken[1]) + 1 : 0;
+      const slice = pool.slice(start, start + b.pageSize);
+      const last = slice[slice.length - 1];
+      return {
+        json: {
+          __type: 'com.amazon.merch.search#FindListingsResponse',
+          hitCount: pool.length,
+          pageToken: start + b.pageSize < pool.length && last ? [String(last.updated), last.listingId] : [],
+          results: slice.map((l) => ({
+            asin: l.status === 'PUBLISHING' ? '' : l.asin, brandName: 'Dinkworthy', createdDate: zonedMidnight(l.product.created) + 36e5, currencyCode: l.mp === 'DE' ? 'EUR' : 'USD',
+            deleteReasonType: '', designId: l.product.designId, listPrice: l.mp === 'DE' ? 17.99 : 19.99, listingId: l.listingId, lockReasonType: '', marketplace: l.mp,
+            productImageUrn: `urn:merch:image:${l.product.designId}`, productTitle: l.product.title, productType: l.product.type, searchableOnRetail: l.status === 'LIVE', status: l.status, updatedDate: l.updated,
+          })),
+        },
+      };
+    }
+    if (path === '/api/reporting/purchases/report' || path === '/api/reporting/purchases/records') {
+      const mp = Object.keys(MIDS).find((k) => MIDS[k] === url.searchParams.get('marketplaceId'));
+      if (!mp) return { json: [] };
+      const from = zonedDay(Number(url.searchParams.get('fromDate')));
+      const to = zonedDay(Number(url.searchParams.get('toDate')));
+      const totals = new Map();
+      for (const { l, u } of salesFor(mp, from, to)) totals.set(l.asin, { l, u: (totals.get(l.asin)?.u ?? 0) + u });
+      const code = mp === 'DE' ? 'EUR' : 'USD';
+      return {
+        json: Array.from(totals.values()).map(({ l, u }) => ({
+          asin: l.asin, marketplaceId: MIDS[mp], productType: l.product.type, unitsSold: u, unitsCancelled: 0, unitsReturned: 0,
+          revenue: { code, value: +(u * 19.99).toFixed(2) }, royalties: { code, value: royalty(mp, u).value },
+        })),
+      };
+    }
+    if (path === '/api/reporting/earnings/report') {
+      // Lists ASINs with titles and types for the range, but it's not the product list.
+      return { json: listings.filter((l) => l.mp === 'US').map((l) => ({ asin: l.asin, productTitle: l.product.title, productType: l.product.type, marketplaceId: MIDS.US, payoutStatus: 'PENDING' })) };
     }
     // Style C's API, on its own host.
     if (path === '/v1/dashboard/recent-products') {

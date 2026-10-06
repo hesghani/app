@@ -83,8 +83,10 @@ pages and wait for them.
    are requested (page numbers, offsets or next-page tokens).
 4. **Download.** It replays those requests for every month going back (400 days by
    default) and every marketplace, four at a time, and reads your catalog in pages of up to
-   250, several at once when the list allows it. Reports without per-day dates are read day
-   by day for recent weeks, plus 30, 90 and 365-day totals per product.
+   250, several at once when the list allows it. Reports of totals per product (Merch's
+   usual format) are read one day at a time for daily history: the first sync covers 90
+   days and each full sync after it reaches 120 days further back, plus 30, 90 and 365-day
+   totals per product. A complete read of the product list replaces the stored one.
 5. **Stay in sync.** Every 30 minutes Loupe repeats the recent days (and the catalog once a
    day). New sales trigger a notification. If Merch signs you out, Loupe asks you to sign in
    and continues by itself once you have.
@@ -104,11 +106,12 @@ names, value types, field names): no titles, prices, ASINs or header values. Sen
 developer and the sync can be adapted to your account.
 
 > Merch's real pages can't be reached from the build environment, so the sync is verified
-> end to end against a stand-in Merch site with three deliberately different API styles
-> (`e2e/fixtures.mjs`). One of them reproduces the account where an earlier version stalled:
-> the API on another host, a 10-product dashboard widget, an empty first report, cursor
-> paging and account data embedded in the page. Connect finishes in about 3 to 10 seconds
-> against each of them.
+> end to end against a stand-in Merch site with four API styles (`e2e/fixtures.mjs`). One
+> mirrors Merch's real API as a user's sync report showed it: products from the
+> `FindListings` search service (search-after page tokens, `hitCount`, listing statuses
+> such as `PUBLISHING` and `PROPAGATED`), sales from `/api/reporting/purchases/report` as
+> totals per product for the requested range, and the tier from `/api/ratelimiter/metadata`.
+> Another reproduces the account where an earlier version stalled.
 
 ## Estimates: read these as ballparks
 

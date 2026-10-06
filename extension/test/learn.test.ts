@@ -1,4 +1,4 @@
-import { buildRequest, chunks, describeRequest, describeShape, isSafeToReplay, isStrongCatalog, isStrongSales, learn, nextPage, rankTemplates, type Capture } from '../src/shared/learn';
+import { buildRequest, chunks, describeRequest, describeShape, isCatalogSource, isSafeToReplay, isStrongCatalog, isStrongSales, learn, nextPage, rankTemplates, type Capture } from '../src/shared/learn';
 import { normalizeCatalog, normalizeStatus } from '../src/shared/catalog';
 import { normalizeSales } from '../src/shared/sales';
 import { shiftZonedDays, zonedDay, zonedToEpoch } from '../src/shared/zoned';
@@ -124,7 +124,7 @@ describe('style C: catalog via POST with next-page tokens and nested listings', 
 
   it('pages with the token until it runs out', () => {
     const next = nextPage(t, {}, capture.payload, 2, 2)!;
-    expect(next).toEqual({ token: 'tok-2' });
+    expect(next).toEqual({ token: 'tok-2', tokenName: 'nextToken' });
     const r = buildRequest(t, { page: next });
     expect(JSON.parse(r.body!)).toMatchObject({ pageSize: 2, nextToken: 'tok-2' });
     expect(nextPage(t, next, { products: [{ id: 'p3', title: 'x', status: 'LIVE' }] }, 1, 3)).toBeNull();
@@ -281,5 +281,59 @@ describe('reports of totals for a date range (no date on each row)', () => {
       { date: '2026-10-04', dateSource: 'url' },
     ).rows;
     expect(rows.map((r) => [r.asin, r.marketplace, r.units, r.royalty])).toEqual([['B0CCCCCCCC', 'US', 5, 12.2]]);
+  });
+});
+
+describe("Merch's FindListings search service", () => {
+  const url = 'https://merch.amazon.com/api/ng-amazon/coral/com.amazon.merch.search.MerchSearchService/FindListings';
+  const body = JSON.stringify({ pageSize: 10, sortField: 'updatedDate', status: ['DRAFT', 'LIVE', 'PUBLISHING'], accountId: '4170000123', __type: 'com.amazon.merch.search#FindListingsRequest' });
+  const listing = (i: number, status: string, asin: string) => ({
+    asin, brandName: 'Brand', createdDate: zonedToEpoch(2026, 1, 1), currencyCode: 'USD', deleteReasonType: '', designId: `d-${i}`, listPrice: 19.99,
+    listingId: `listing-${i}`.padEnd(48, '0'), lockReasonType: '', marketplace: 'US', productImageUrn: 'urn:x', productTitle: `Design ${i}`, productType: 'STANDARD_TSHIRT',
+    searchableOnRetail: true, status, updatedDate: 1791287012145 - i,
+  });
+  const payload = { __type: 'x', hitCount: 6017, pageToken: ['1791287012136', 'listing-9'], results: [listing(0, 'PUBLISHING', ''), listing(1, 'LIVE', 'B0AAAAAAAA'), listing(2, 'PROPAGATED', 'B0BBBBBBBB')] };
+  const learned = learn(cap({ url, method: 'POST', body, headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': 't' }, payload }));
+
+  it('learns a paged product list with listing ids and statuses', () => {
+    expect(learned.kind).toBe('catalog');
+    expect(learned.template?.tokenKey).toBe('pageToken');
+    expect(isStrongCatalog(learned.template)).toBe(true);
+    expect(learned.items.map((i) => [i.key.slice(0, 10), i.asin, i.status])).toEqual([
+      ['L:listing-', null, 'processing'],
+      ['L:listing-', 'B0AAAAAAAA', 'live'],
+      ['L:listing-', 'B0BBBBBBBB', 'processing'],
+    ]);
+  });
+
+  it('asks for the next page with the search-after pair, and stops at hitCount', () => {
+    const t = learned.template!;
+    const next = nextPage(t, {}, payload, 3, 3)!;
+    expect(next.token).toEqual(['1791287012136', 'listing-9']);
+    const req = buildRequest(t, { page: next });
+    expect(JSON.parse(req.body!).pageToken).toEqual(['1791287012136', 'listing-9']);
+    expect(nextPage(t, next, payload, 3, 6017)).toBeNull();
+    // A template learned before array tokens were understood still pages.
+    const legacy = { ...t, tokenKey: null };
+    const n2 = nextPage(legacy, {}, payload, 3, 3)!;
+    expect(JSON.parse(buildRequest(legacy, { page: n2 }).body!).pageToken).toEqual(['1791287012136', 'listing-9']);
+  });
+
+  it('an earnings report that lists ASINs for a date range is not the product list', () => {
+    const e = learn(cap({
+      url: `https://merch.amazon.com/api/reporting/earnings/report?marketplaceId=ATVPDKIKX0DER&fromDate=${zonedToEpoch(2026, 9, 7)}&toDate=${zonedToEpoch(2026, 10, 6, 23, 59, 59, 999)}`,
+      payload: [{ asin: 'B0AAAAAAAA', productTitle: 'Design', productType: 'STANDARD_TSHIRT', payoutStatus: 'PENDING' }],
+    }));
+    expect(e.items).toEqual([]);
+    expect(e.kind).not.toBe('catalog');
+    expect(isCatalogSource({ ...learned.template!, window: { from: '2026-09-07', to: '2026-10-06' } })).toBe(false);
+  });
+
+  it('reads the tier from the rate limiter and keeps ids out of response shapes', () => {
+    const r = learn(cap({ url: 'https://merch.amazon.com/api/ratelimiter/metadata', payload: { dailyProduct: { count: 4, limit: 100 }, overallProduct: { count: 5628, limit: 8000 }, overallDesign: { count: 984, limit: 1000 } } }));
+    expect(r.account?.tier).toBe(1000);
+    expect(r.account?.facts['overallDesign.count']).toBe(984);
+    const shape = describeShape({ urls: { '610c211f-2d3c-4e06-8785-1bb08b4bcb9f_STANDARD_TSHIRT_US': { size: 1 }, 'a85c8263-d34e-4e66-b02d-6bd54bedd246_HOODIE_US': { size: 2 } } });
+    expect(shape).toEqual(['urls.<id>.size: number']);
   });
 });

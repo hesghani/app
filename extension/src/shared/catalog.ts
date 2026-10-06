@@ -14,6 +14,7 @@ type Obj = { [key: string]: Json };
 const KEYS = {
   asin: ['asin', 'childasin', 'productasin', 'listingasin'],
   id: ['id', 'productid', 'listingid', 'merchproductid', 'gearproductid', 'uuid', 'externalid'],
+  listingId: ['listingid', 'merchlistingid'],
   designId: ['designid', 'artworkid', 'imageid', 'designuuid', 'groupid', 'parentid'],
   title: ['title', 'producttitle', 'designtitle', 'listingtitle', 'itemname', 'name', 'productname', 'designname'],
   brand: ['brand', 'brandname'],
@@ -58,7 +59,7 @@ export function normalizeStatus(raw: string): CatalogStatus {
   if (/reject|declin|denied|violat|not.?approved/.test(s)) return 'rejected';
   if (/remov|delet|archiv|timed.?out|inactive|unpublish|delist|expired|not.?discoverable/.test(s)) return 'removed';
   if (/review|pending|submitted|under/.test(s)) return 'review';
-  if (/process|transcod|in.?progress|publishing/.test(s)) return 'processing';
+  if (/process|transcod|in.?progress|publishing|propagat|translat/.test(s)) return 'processing';
   if (/draft|unsubmitted|not.?submitted/.test(s)) return 'draft';
   if (/live|published|active|available|approved|on.?sale/.test(s)) return 'live';
   return 'other';
@@ -73,6 +74,7 @@ interface Ctx {
   status?: string;
   image?: string;
   id?: string;
+  listingId?: string;
   marketplace?: MarketplaceId;
 }
 
@@ -94,6 +96,8 @@ function own(obj: Obj): Ctx {
   if (image) ctx.image = image;
   const id = str(pick(obj, 'id'));
   if (id) ctx.id = id;
+  const listingId = str(pick(obj, 'listingId'));
+  if (listingId) ctx.listingId = listingId;
   const mp = marketplaceFromAny(pick(obj, 'marketplace'));
   if (mp) ctx.marketplace = mp;
   return ctx;
@@ -117,7 +121,8 @@ export function normalizeCatalog(payload: unknown, now = Date.now()): CatalogIte
   const emit = (c: Ctx, asin: string | null, priceRaw: Json | undefined) => {
     if (!c.title && !asin) return;
     const productType = productTypeFromLabel(c.productType ?? null) ?? productTypeFromLabel(c.title ?? null);
-    const key = asin ? `${c.marketplace ?? 'XX'}:${asin}` : `id:${c.id ?? ''}:${c.marketplace ?? ''}:${c.productType ?? ''}:${c.title ?? ''}`;
+    // A Merch listing id stays the same while the listing gets its ASIN and changes status.
+    const key = c.listingId && c.marketplace ? `L:${c.listingId}` : asin ? `${c.marketplace ?? 'XX'}:${asin}` : `id:${c.id ?? ''}:${c.marketplace ?? ''}:${c.productType ?? ''}:${c.title ?? ''}`;
     const price = typeof priceRaw === 'number' ? priceRaw : priceRaw !== undefined ? Number(String(priceRaw).replace(/[^\d.]/g, '')) || null : null;
     items.set(key, {
       key,

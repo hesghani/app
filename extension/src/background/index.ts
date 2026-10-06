@@ -86,7 +86,7 @@ async function ingestTotals(totals: RangeTotal[]) {
 }
 
 /** Items without a known marketplace (from widgets and summaries) are placeholders until the real listing arrives. */
-const partial = (key: string) => key.startsWith('XX:') || key.startsWith('id:');
+const partial = (key: string) => key.startsWith('XX:') || /^id:[^:]*::/.test(key);
 
 async function ingestCatalog(items: CatalogItem[]) {
   return serial(async () => {
@@ -109,15 +109,12 @@ async function ingestCatalog(items: CatalogItem[]) {
   });
 }
 
-/** After a complete catalog read: live listings that weren't returned are no longer live, and placeholders go. */
+/** After a complete read of the product list, it is the truth: anything it didn't return goes. */
 async function catalogComplete(startedAt: number) {
   return serial(async () => {
-    const stale = (await getAll('catalog')).filter((i) => i.seenAt < startedAt);
-    const placeholders = stale.filter((i) => partial(i.key)).map((i) => i.key);
-    const gone = stale.filter((i) => !partial(i.key) && i.status === 'live');
-    if (!placeholders.length && !gone.length) return;
-    await putMany('catalog', gone.map((i) => ({ ...i, status: 'removed' as const, rawStatus: 'not listed' })));
-    await deleteMany('catalog', placeholders);
+    const stale = (await getAll('catalog')).filter((i) => i.seenAt < startedAt).map((i) => i.key);
+    if (!stale.length) return;
+    await deleteMany('catalog', stale);
     await bump('catalog');
   });
 }

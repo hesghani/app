@@ -61,6 +61,10 @@ export function syncReport(r: ReportInput): string {
     lines.push(`  dates ${t.dates.map((d) => `${d.role}:${d.format}@${d.loc.in === 'body' ? d.loc.path.join('.') : d.loc.key}`).join(', ') || 'none'} · window ${t.window ? `${t.window.from}..${t.window.to}` : 'none'}`);
     lines.push(`  markets ${t.allMarkets ? 'all' : t.markets.map((m) => `${m.format}@${m.loc.in === 'body' ? m.loc.path.join('.') : m.loc.key}`).join(', ') || 'none'} · pages ${t.pages.map((p) => `${p.role}@${p.loc.in === 'body' ? p.loc.path.join('.') : p.loc.key}`).join(', ') || 'none'}${t.tokenKey ? ` · token ${t.tokenKey}` : ''} · rows ${t.rows}`);
     lines.push(`  header names: ${Object.keys(t.headers).join(', ') || 'none'}`);
+    if (t.shape?.length) {
+      lines.push('  response:');
+      for (const k of t.shape.slice(0, 24)) lines.push(`    ${k}`);
+    }
   }
   lines.push('');
   lines.push(`Responses seen on merch.amazon.com (${r.captureLog.length}, newest first):`);

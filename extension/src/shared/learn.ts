@@ -56,6 +56,8 @@ export interface Template {
   window: { from: string; to: string } | null;
   tokenKey: string | null;
   rows: number;
+  /** Field names and value kinds of the response it was learned from (no values), for the sync report. */
+  shape?: string[];
   capturedAt: number;
 }
 
@@ -184,7 +186,12 @@ const PAGE_KEYS: Record<string, PageSlot['role']> = {
 };
 
 const TOKEN_RESPONSE_KEYS = ['nexttoken', 'nextpagetoken', 'pagetoken', 'nextcursor', 'cursor', 'continuationtoken', 'paginationtoken', 'lastevaluatedkey', 'nextkey', 'nextmarker', 'marker'];
-const TOTAL_KEYS = ['total', 'totalcount', 'totalresults', 'totalitems', 'totalelements', 'totalhits', 'numfound', 'totalrecords', 'totalproducts'];
+const TOTAL_KEYS = ['total', 'totalcount', 'totalresults', 'totalitems', 'totalelements', 'totalhits', 'hitcount', 'resultcount', 'totalresultcount', 'numfound', 'totalrecords', 'totalproducts'];
+
+/** A next-page token: a string, or a search-after list like ["1791287012145", "a1b2…"]. */
+function isToken(v: unknown): v is string | unknown[] {
+  return (typeof v === 'string' && v.length > 0) || (Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === 'string' || typeof x === 'number'));
+}
 
 const norm = (k: string) => k.toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -286,7 +293,7 @@ function detectPages(list: Leaf[]): PageSlot[] {
   for (const leaf of list) {
     const role = PAGE_KEYS[norm(leaf.key)];
     if (!role) continue;
-    if (role === 'token') pages.push({ loc: leaf.loc, role, value: (leaf.value as string | null) ?? null });
+    if (role === 'token') pages.push({ loc: leaf.loc, role, value: typeof leaf.value === 'string' ? leaf.value : null });
     else {
       const n = Number(leaf.value);
       if (Number.isFinite(n) && n >= 0 && n < 1e6 && dateFormatOf(leaf.value, leaf.key) === null) pages.push({ loc: leaf.loc, role, value: leaf.value as number | string });
@@ -356,6 +363,14 @@ export function requestContext(c: Capture): Context {
 
 const SALES_PATH = /sale|purchase|royalt|report|analy|order|earning|revenue/i;
 
+function pathOf(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return url;
+  }
+}
+
 function hasArray(payload: unknown, depth = 3): boolean {
   if (Array.isArray(payload)) return true;
   if (!payload || typeof payload !== 'object' || depth === 0) return false;
@@ -398,7 +413,9 @@ export function learn(c: Capture): Learned {
   if (!rows.length && range && range.from !== range.to) {
     totals = normalizeSales(c.payload, c.url, { ...ctx, date: range.to, dateSource: 'url' }).rows.length;
   }
-  const items = rows.length || totals ? [] : normalizeCatalog(c.payload, c.at);
+  // A report bounded by dates lists ASINs too, but it isn't the product list.
+  const reportPath = range !== null && SALES_PATH.test(pathOf(c.url));
+  const items = rows.length || totals || reportPath ? [] : normalizeCatalog(c.payload, c.at);
   const account = accountFacts(c.payload, c.at);
   let kind: Learned['kind'] = rows.length || totals ? 'sales' : items.length ? 'catalog' : 'none';
   let template: Template | null = null;
@@ -421,7 +438,8 @@ export function learn(c: Capture): Learned {
       allMarkets: all,
       dated: rows.length > 0 && dated,
       window: range,
-      tokenKey: token && typeof token.value === 'string' ? token.key : null,
+      tokenKey: token && isToken(token.value) ? token.key : null,
+      shape: describeShape(c.payload, 30),
       rows: kind === 'sales' ? rows.length || totals : items.length,
       capturedAt: c.at,
     };
@@ -455,12 +473,24 @@ export function isUnverifiedSales(t: Template | null | undefined): boolean {
  * lot. A dashboard widget showing your 10 newest products is not a catalog.
  */
 export function isStrongCatalog(t: Template | null | undefined): boolean {
-  return Boolean(t && t.kind === 'catalog' && (canPage(t) || t.rows >= 50));
+  return Boolean(t && isCatalogSource(t) && (canPage(t) || t.rows >= 50));
+}
+
+/** A product list isn't bounded by dates: a dated report that lists ASINs (earnings, sales) is not the catalog. */
+export function isCatalogSource(t: Template | null | undefined): boolean {
+  return Boolean(t && t.kind === 'catalog' && !t.window);
 }
 
 // ---------- building new requests ----------
 
-export interface PageState { page?: number; offset?: number; token?: string | null; size?: number }
+export interface PageState {
+  page?: number;
+  offset?: number;
+  token?: string | unknown[] | null;
+  /** The response field the token came from, when the template didn't know it yet. */
+  tokenName?: string;
+  size?: number;
+}
 
 function setAt(target: { query: URLSearchParams; form: URLSearchParams | null; body: unknown }, loc: Loc, value: unknown) {
   if (loc.in === 'query') {
@@ -511,10 +541,11 @@ export function buildRequest(
       if (slot.role === 'token') setAt(target, slot.loc, page.token ?? null);
     }
     // The first request had no token parameter; add one named like the response field.
-    if (page.token && !t.pages.some((p) => p.role === 'token') && t.tokenKey) {
-      const name = /cursor/i.test(t.tokenKey) ? t.tokenKey.replace(/^next/i, '').replace(/^./, (c) => c.toLowerCase()) || 'cursor' : t.tokenKey;
+    const tokenKey = t.tokenKey ?? page.tokenName;
+    if (page.token && !t.pages.some((p) => p.role === 'token') && tokenKey) {
+      const name = /cursor/i.test(tokenKey) ? tokenKey.replace(/^next/i, '').replace(/^./, (c) => c.toLowerCase()) || 'cursor' : tokenKey;
       if (t.bodyType === 'json' && target.body && typeof target.body === 'object') (target.body as Record<string, unknown>)[name] = page.token;
-      else target.query.set(name, page.token);
+      else target.query.set(name, typeof page.token === 'string' ? page.token : JSON.stringify(page.token));
     }
   }
 
@@ -528,7 +559,9 @@ export function nextPage(t: Template, current: PageState, payload: unknown, retu
   const total = findKey(payload, TOTAL_KEYS);
   if (total && typeof total.value === 'number' && seen >= total.value) return null;
   const token = t.tokenKey ? findKey(payload, [norm(t.tokenKey)]) : findKey(payload, TOKEN_RESPONSE_KEYS);
-  if (token && typeof token.value === 'string' && token.value && token.value !== current.token) return { ...current, token: token.value };
+  if (token && isToken(token.value) && JSON.stringify(token.value) !== JSON.stringify(current.token ?? null)) {
+    return { ...current, token: token.value, tokenName: token.key };
+  }
   if (token === null && (t.tokenKey || t.pages.some((p) => p.role === 'token'))) return null;
   const pageSlot = t.pages.find((p) => p.role === 'page');
   if (pageSlot) {
@@ -557,7 +590,7 @@ export function chunks(from: string, to: string, size: number): Array<{ from: st
 
 // ---------- account facts ----------
 
-const FACT = /tier|limit|quota|remaining|slots?$|maxdesigns|maxproducts|dailypublish|uploadsleft|uploadstoday|publishedtoday|livedesigns|liveproducts|designcount|productcount|uploadcount|publishcount/;
+const FACT = /tier|limit|quota|remaining|slots?$|maxdesigns|maxproducts|dailypublish|uploadsleft|uploadstoday|publishedtoday|livedesigns|liveproducts|designcount|productcount|uploadcount|publishcount|(design|product).*count$/;
 
 export function accountFacts(payload: unknown, at: number): AccountFacts | null {
   const facts: Record<string, number> = {};
@@ -568,7 +601,9 @@ export function accountFacts(payload: unknown, at: number): AccountFacts | null 
     for (const [k, v] of Object.entries(node)) {
       const key = norm(k);
       const here = path ? `${path}.${k}` : k;
-      if (typeof v === 'number' && FACT.test(key)) facts[here] = v;
+      if (typeof v === 'number' && (FACT.test(key) || FACT.test(norm(here)))) facts[here] = v;
+      // Merch's rate limiter: {overallDesign: {count, limit}}; the design limit is the tier.
+      if (typeof v === 'number' && key === 'limit' && /design/i.test(path) && !/daily/i.test(path) && v >= 10 && v <= 1_000_000) tier = v;
       if (/^(tier|currenttier|tierlevel|accounttier|producttier|tiername|tiervalue)$/.test(key)) {
         const n = typeof v === 'number' ? v : Number(String(v).replace(/[^\d]/g, ''));
         if (Number.isFinite(n) && n >= 10 && n <= 1_000_000) tier = n;
@@ -583,15 +618,31 @@ export function accountFacts(payload: unknown, at: number): AccountFacts | null 
 
 // ---------- redacted description for the sync report ----------
 
+/** Keys that are themselves data (design ids, ASINs, long numbers) are shown as <id>. */
+function keyName(k: string): string {
+  if (/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}/i.test(k) || /^B0[A-Z0-9]{8}$/.test(k) || /\d{6,}/.test(k)) return '<id>';
+  return k;
+}
+
 export function describeShape(payload: unknown, maxKeys = 50): string[] {
   const out: string[] = [];
+  const seen = new Set<string>();
   const walk = (node: unknown, path: string, depth: number) => {
     if (out.length >= maxKeys || depth > 5) return;
     if (Array.isArray(node)) {
       out.push(`${path || '$'}: array(${node.length})`);
       if (node.length) walk(node[0], `${path}[]`, depth + 1);
     } else if (node && typeof node === 'object') {
-      for (const [k, v] of Object.entries(node)) walk(v, path ? `${path}.${k}` : k, depth + 1);
+      for (const [k, v] of Object.entries(node)) {
+        const name = keyName(k);
+        const next = path ? `${path}.${name}` : name;
+        // Maps keyed by ids: describe one entry.
+        if (name === '<id>') {
+          if (seen.has(next)) continue;
+          seen.add(next);
+        }
+        walk(v, next, depth + 1);
+      }
     } else {
       out.push(`${path || '$'}: ${kindOf(node, path)}`);
     }
