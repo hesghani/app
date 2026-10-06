@@ -13,6 +13,7 @@ import { mergeSales, rowKey } from '../shared/sales';
 import { get, getSettings, productKey, pruneProducts, saveProduct, set, allProducts, update } from '../shared/storage';
 import type { AccountFacts, CaptureLogEntry, CatalogItem, ProductData, RangeTotal, SaleRow } from '../shared/types';
 import { MERCH, configureSync, onTabUpdated, startSync, stopSync, syncActive, watchdog } from './sync';
+import { setReportZone } from '../shared/zoned';
 
 // ---------- Serialized writes ----------
 
@@ -184,7 +185,27 @@ async function logCapture(entry: CaptureLogEntry) {
 
 // ---------- Sync ----------
 
-configureSync({ ingestSales, ingestTotals, ingestCatalog, catalogComplete, mergeAccount, saveTemplate: (t) => saveTemplate(t), refreshBadge });
+configureSync({ ingestSales, ingestTotals, ingestCatalog, catalogComplete, mergeAccount, saveTemplate: (t) => saveTemplate(t), refreshBadge, pruneSpans });
+
+/** Multi-day totals that reach into days daily rows now cover would count those days twice. */
+async function pruneSpans(from: string) {
+  return serial(async () => {
+    const stale = (await getAll('sales')).filter((r) => r.until && r.until >= from).map((r) => rowKey(r));
+    if (!stale.length) return;
+    await deleteMany('sales', stale);
+    await bump('sales');
+  });
+}
+
+/** Merch's own pages showed which time zone they count days in. */
+async function zoneDetected(zone: string) {
+  const meta = await get('meta');
+  if (meta.reportZone === zone) return;
+  await set('meta', { ...meta, reportZone: zone });
+  setReportZone(zone);
+}
+
+void get('meta').then((m) => setReportZone(m.reportZone));
 
 const MERCH_HOME = `${MERCH}/dashboard`;
 
@@ -331,6 +352,7 @@ chrome.runtime.onMessage.addListener((message: Message & { target?: string }, se
     case 'capture:log': return reply(logCapture(message.entry));
     case 'sync:start': return reply(startSync(message.mode, message.interactive));
     case 'sync:stop': return reply(stopSync().then(() => ({ stopping: true })));
+    case 'zone:detected': return reply(zoneDetected(message.zone));
     case 'watchlist:refresh': return reply(refreshWatchlist(message.keys));
     case 'settings:changed': return reply(Promise.all([scheduleAlarms(), refreshBadge()]));
     case 'badge:refresh': return reply(refreshBadge());

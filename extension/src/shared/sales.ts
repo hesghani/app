@@ -251,8 +251,8 @@ export function contextFromUrl(url: string): Context {
   return ctx;
 }
 
-export function rowKey(r: Pick<SaleRow, 'date' | 'marketplace' | 'asin' | 'productType'>): string {
-  return `${r.date}|${r.marketplace}|${r.asin}|${r.productType ?? ''}`;
+export function rowKey(r: Pick<SaleRow, 'date' | 'marketplace' | 'asin' | 'productType' | 'until'>): string {
+  return `${r.date}|${r.marketplace}|${r.asin}|${r.productType ?? ''}${r.until ? `|${r.until}` : ''}`;
 }
 
 /** Sums rows that share a key (a payload may list one row per order or per size). */

@@ -463,19 +463,27 @@ console.log("Scenario D: Merch's real API (FindListings search-after paging, ran
       assert.ok(totals.some((t) => t.days === 365), '365-day totals per product');
       assert.equal((await storage(dash, 'account')).tier, 1000, 'tier from the rate limiter');
       assert.equal(merch.state.forbidden, 0, 'every request carried X-CSRF-Token');
+      const meta = await storage(dash, 'meta');
+      assert.ok(rows.some((r) => r.until), 'older history is stored as monthly totals');
+      assert.ok(meta.history.from < `${merch.today.slice(0, 4)}-01-01`, `history reaches past years (${meta.history.from})`);
+      assert.ok(meta.verify?.ranges.length >= 5, 'compared with Merch’s own totals');
+      for (const r of meta.verify.ranges) assert.equal(r.loupe, r.merch, `${r.label}: Loupe ${r.loupe} vs Merch ${r.merch}`);
+      console.log(`    matches Merch: ${meta.verify.ranges.map((r) => `${r.label} ${r.merch}`).join(' · ')}`);
+      assert.equal(meta.reportZone, 'America/Los_Angeles', 'day boundaries taken from Merch’s own requests');
     });
 
-    await step('the next full sync reaches further back in history', async () => {
-      const before = (await storage(dash, 'meta')).coverage.salesFrom;
+    await step('the next full sync is incremental and still matches Merch', async () => {
       const started = (await storage(dash, 'syncState')).startedAt;
+      merch.state.apiCalls = 0;
       await dash.evaluate(() => chrome.runtime.sendMessage({ type: 'sync:start', mode: 'full', interactive: false }));
       const s = await until(async () => {
         const s = await storage(dash, 'syncState');
         return s.startedAt > started && s.status !== 'running' ? s : null;
       }, { timeout: 90000, message: 'second full sync' });
       assert.equal(s.status, 'done', `${s.phase} ${s.error ?? ''}`);
-      const after = (await storage(dash, 'meta')).coverage.salesFrom;
-      assert.ok(after < before, `history extended from ${before} to ${after}`);
+      assert.ok(merch.state.apiCalls < 120, `old months aren't downloaded again (${merch.state.apiCalls} requests)`);
+      const meta = await storage(dash, 'meta');
+      for (const r of meta.verify.ranges) assert.equal(r.loupe, r.merch, `${r.label}: Loupe ${r.loupe} vs Merch ${r.merch}`);
     });
   } finally {
     await close();

@@ -16,6 +16,7 @@ import type { ListingDraft, SyncState } from '../../shared/types';
 import { Alert, Close, External, Logo, Refresh, Shield, Wand } from '../../ui/icons';
 import { mount } from '../shared/mount';
 import { Emitter, useEmitter } from '../shared/store';
+import { DEFAULT_ZONE, setReportZone, zoneOfMidnight } from '../../shared/zoned';
 import { BASE_CSS } from '../shared/styles';
 import { bulletsToDescription, fillListing, findAndReplace, findListingFields, type ListingField } from './fields';
 
@@ -34,7 +35,24 @@ interface RawCapture {
   reqBody?: string;
 }
 
+/** Merch's own report requests show which time zone its pages count days in. */
+function detectZone(url: string) {
+  try {
+    const u = new URL(url);
+    if (!/report|analy|sales|purchase|earning/i.test(u.pathname)) return;
+    for (const [k, v] of u.searchParams) {
+      if (!/^(?:from|start)/i.test(k) || !/^\d{13}$/.test(v)) continue;
+      const zone = zoneOfMidnight(Number(v), [Intl.DateTimeFormat().resolvedOptions().timeZone, DEFAULT_ZONE, 'UTC']);
+      if (zone) void send({ type: 'zone:detected', zone });
+      return;
+    }
+  } catch {
+    /* not a URL */
+  }
+}
+
 function handleCapture(data: RawCapture) {
+  detectZone(data.url);
   let payload: unknown = data.json;
   if (payload === undefined && typeof data.body === 'string') {
     try {
@@ -72,6 +90,7 @@ window.addEventListener('message', (event) => {
   if (event.source !== window || event.origin !== location.origin) return;
   if ((event.data as { __loupe?: string })?.__loupe === 'capture') handleCapture(event.data as RawCapture);
 });
+void get('meta').then((m) => setReportZone(m.reportZone));
 window.postMessage({ __loupe: 'ready' }, location.origin);
 
 // ---------- dock (top frame) ----------

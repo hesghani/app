@@ -2,7 +2,7 @@ import { useMemo, useState } from 'preact/hooks';
 import {
   breakdown, bucketSeries, dailySeries, filterRows, percentChange, productSummaries, totals,
 } from '../../shared/analytics';
-import { daysBetween, localDay, previousRange, RANGE_LABELS, resolveRange, type RangeKey } from '../../shared/dates';
+import { daysBetween, pacificDay, previousRange, RANGE_LABELS, resolveRange, type RangeKey } from '../../shared/dates';
 import * as fmt from '../../shared/format';
 import { MARKETPLACES, productUrl, type MarketplaceId } from '../../shared/marketplaces';
 import { PRODUCT_TYPES, type ProductType } from '../../shared/products';
@@ -26,7 +26,7 @@ export function Overview({ data }: { data: Data }) {
   const [showTable, setShowTable] = useState(false);
   const currency = settings.displayCurrency;
   const fx = settings.fx;
-  const today = localDay();
+  const today = pacificDay(Date.now());
 
   const view = useMemo(() => {
     const earliest = sales.reduce((min, r) => (r.date < min ? r.date : min), today);
@@ -102,6 +102,20 @@ export function Overview({ data }: { data: Data }) {
           hint={`${fmt.int(t.cancelled)} cancelled, ${fmt.int(t.returned)} returned in this range`}
         />
       </div>
+
+      {meta.verify && mp === 'ALL' && type === 'ALL' && (
+        <div class="row wrap small muted" aria-label="Checked against Merch">
+          <span>Checked against Merch's own totals {fmt.ago(meta.verify.at)}:</span>
+          {meta.verify.ranges.map((r) => {
+            const ok = Math.abs(r.loupe - r.merch) <= Math.max(1, r.merch * 0.005);
+            return (
+              <span class={`pill ${ok ? 'good' : 'warn'}`} title={`${fmt.day(r.from, 'long')} – ${fmt.day(r.to, 'long')}`}>
+                {r.label} {fmt.int(r.merch)}{ok ? ' ✓' : ` · Loupe ${fmt.int(r.loupe)}`}
+              </span>
+            );
+          })}
+        </div>
+      )}
 
       <Card
         title={metric === 'units' ? `Units sold per ${view.bucket}` : `Royalties per ${view.bucket} (${currency})`}

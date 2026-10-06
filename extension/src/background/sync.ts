@@ -31,12 +31,15 @@ import {
   type PageState,
   type Template,
 } from '../shared/learn';
-import { MARKETPLACE_IDS, type MarketplaceId } from '../shared/marketplaces';
+import { MARKETPLACES, MARKETPLACE_IDS, type MarketplaceId } from '../shared/marketplaces';
+import { getAll } from '../shared/db';
+import { share } from '../shared/analytics';
+import type { Meta } from '../shared/storage';
 import { normalizeSales } from '../shared/sales';
 import type { Settings } from '../shared/settings';
 import { get, getSettings, set, update } from '../shared/storage';
 import type { AccountFacts, CatalogItem, RangeTotal, SaleRow, SyncDebug, SyncMode, SyncState } from '../shared/types';
-import { zonedDay, zonedToEpoch } from '../shared/zoned';
+import { reportZone, setReportZone, zonedDay, zonedToEpoch } from '../shared/zoned';
 import { pageFetch, pageInfo, pageScan, type PageInfo, type Wire, type WireResult } from './page';
 
 export interface SyncHooks {
@@ -47,6 +50,8 @@ export interface SyncHooks {
   mergeAccount(account: AccountFacts): Promise<unknown>;
   saveTemplate(template: Template): Promise<unknown>;
   refreshBadge(): Promise<unknown>;
+  /** Deletes multi-day totals that reach into [from, …], where daily rows now cover. */
+  pruneSpans(from: string): Promise<unknown>;
 }
 
 let hooks: SyncHooks | null = null;
@@ -630,20 +635,17 @@ async function downloadSales(run: Run, t: Template): Promise<number> {
       });
       await detail(run, `selling in ${activeMarkets.map((m) => m ?? 'all').join(', ') || 'no marketplace in the past year'}`);
     }
-    // Days to read: the last week every time; a full sync also reaches 120 days
-    // further back (90 on the first one) until the whole history is covered.
+    // Days to read one at a time: every day since the last sync (no gaps), the
+    // last week on a full sync, and the last 90 days the first time. Older
+    // history is kept as monthly totals (below).
     const days = new Set<string>();
-    const recent = quick ? 2 : 7;
-    for (let i = 0; i < recent; i++) days.add(addDays(today, -i));
-    if (!quick) {
-      const reached = meta.coverage?.salesFrom && meta.coverage.salesFrom < addDays(today, -6) ? meta.coverage.salesFrom : null;
-      const start = reached ?? addDays(today, -6);
-      const target = addDays(start, -(reached ? 120 : 83));
-      const stop = target < historyFrom ? historyFrom : target;
-      for (let d = addDays(start, -1); d >= stop; d = addDays(d, -1)) days.add(d);
-      coveredFrom = stop < start ? stop : start;
-    } else coveredFrom = today;
+    const lastDay = meta.coverage?.salesTo;
+    const firstTime = !meta.coverage?.salesFrom;
+    if (lastDay) for (let d = today, i = 0; d >= addDays(lastDay, -1) && i < (quick ? 14 : 62); d = addDays(d, -1), i++) days.add(d);
+    for (let i = 0; i < (quick ? 2 : 7); i++) days.add(addDays(today, -i));
+    if (firstTime && !quick) for (let i = 0; i < 90; i++) days.add(addDays(today, -i));
     const dayList = Array.from(days).sort().reverse();
+    coveredFrom = firstTime && !quick ? dayList[dayList.length - 1]! : (meta.coverage?.salesFrom ?? today);
     const plan = activeMarkets.flatMap((mp) => [
       ...dayList.map((day) => ({ mp, from: day, to: day, window: 0 })),
       ...(quick ? [] : [30, 90].map((w) => ({ mp, from: addDays(today, -(w - 1)), to: today, window: w }))),
@@ -659,6 +661,15 @@ async function downloadSales(run: Run, t: Template): Promise<number> {
       await progress(run, step.window ? `Reading ${step.window}-day totals` : `Downloading sales · ${step.from}${step.mp ? ` · ${step.mp}` : ''} · ${rows.toLocaleString()} rows`, done, plan.length);
     });
     await detail(run, `sales: ${rows.toLocaleString()} daily rows over ${dayList.length} days`);
+    await update('meta', (m) => ({
+      ...m,
+      coverage: { ...(m.coverage ?? {}), salesFrom: !m.coverage?.salesFrom || coveredFrom < m.coverage.salesFrom ? coveredFrom : m.coverage.salesFrom, salesTo: today },
+    }));
+    if (!quick) {
+      const dailyFrom = (await get('meta')).coverage?.salesFrom ?? coveredFrom;
+      rows += await monthlyHistory(run, t, markets, dailyFrom);
+    }
+    return rows;
   }
   if (!quick) {
     await update('meta', (m) => ({
@@ -667,6 +678,126 @@ async function downloadSales(run: Run, t: Template): Promise<number> {
     }));
   }
   return rows;
+}
+
+const FIRST_YEAR = 2015;
+
+function monthEnd(month: string): string {
+  const [y, m] = month.split('-').map(Number) as [number, number];
+  return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
+}
+
+/**
+ * History before the daily window, as monthly totals per product and
+ * marketplace, back to the first sale: one request per marketplace-year to
+ * find the years that sold, then one per month in those years. Months older
+ * than a quarter are final and never asked for again.
+ */
+async function monthlyHistory(run: Run, t: Template, markets: Array<MarketplaceId | undefined>, dailyFrom: string): Promise<number> {
+  const stop = addDays(dailyFrom, -1);
+  const lastYear = Number(stop.slice(0, 4));
+  if (lastYear < FIRST_YEAR) return 0;
+  await hooks!.pruneSpans(dailyFrom);
+  const meta = await get('meta');
+  const hist = meta.history ?? { months: {}, years: {} };
+  const mpKey = (mp: MarketplaceId | undefined) => mp ?? 'ALL';
+  const yearsFor = (mp: MarketplaceId | undefined) => new Set(hist.years[mpKey(mp)] ?? []);
+  const rescanFrom = hist.scannedAt ? lastYear - 1 : FIRST_YEAR;
+
+  // 1. Which years sold, per marketplace.
+  const yearPlan = markets.flatMap((mp) => Array.from({ length: lastYear - rescanFrom + 1 }, (_, i) => ({ mp, year: rescanFrom + i })));
+  await note(run, `Finding the years you sold in (${yearPlan.length} checks)…`);
+  const found = new Map<string, Set<number>>();
+  for (const mp of markets) found.set(mpKey(mp), yearsFor(mp));
+  let done = 0;
+  await pool(yearPlan, 6, async ({ mp, year }) => {
+    const to = `${year}-12-31` < stop ? `${year}-12-31` : stop;
+    let n = 0;
+    for (const c of await salesRange(run, t, { from: `${year}-01-01`, to, marketplace: mp }, false)) n += learn(c).totals + learn(c).rows.length;
+    const set = found.get(mpKey(mp))!;
+    if (n > 0) set.add(year);
+    else set.delete(year);
+    done += 1;
+    await progress(run, `Finding the years you sold in · ${year}${mp ? ` · ${mp}` : ''}`, done, yearPlan.length);
+  });
+
+  // 2. Each month of those years, unless already stored for good.
+  const finalBefore = addDays(stop, -92);
+  const monthPlan: Array<{ mp: MarketplaceId | undefined; from: string; to: string; key: string }> = [];
+  for (const mp of markets) {
+    for (const year of Array.from(found.get(mpKey(mp))!).sort()) {
+      for (let m = 1; m <= 12; m++) {
+        const from = `${year}-${String(m).padStart(2, '0')}-01`;
+        if (from > stop) break;
+        const end = monthEnd(from.slice(0, 7));
+        const to = end < stop ? end : stop;
+        const key = `${mpKey(mp)}|${from.slice(0, 7)}|${to}`;
+        if (hist.months[key] && to < finalBefore) continue;
+        monthPlan.push({ mp, from, to, key });
+      }
+    }
+  }
+  if (monthPlan.length) await note(run, `Downloading monthly history: ${monthPlan.length} marketplace-months…`);
+  let rows = 0;
+  done = 0;
+  const months: Record<string, number> = { ...hist.months };
+  await pool(monthPlan, 6, async (step) => {
+    let n = 0;
+    for (const c of await salesRange(run, t, { from: step.from, to: step.to, marketplace: step.mp }, false)) {
+      const { rows: monthRows } = normalizeSales(c.payload, c.url, { ...requestContext(c), date: step.from, dateSource: 'url' });
+      const spans = monthRows.map((r) => (step.to === step.from ? r : { ...r, until: step.to }));
+      if (spans.length) await hooks!.ingestSales(spans.map((r) => ({ ...r, source: 'capture' as const })));
+      n += spans.length;
+    }
+    months[step.key] = n;
+    rows += n;
+    done += 1;
+    await progress(run, `Downloading history · ${step.from.slice(0, 7)}${step.mp ? ` · ${step.mp}` : ''} · ${rows.toLocaleString()} product-months`, done, monthPlan.length);
+  });
+  const years: Record<string, number[]> = {};
+  for (const [k, v] of found) years[k] = Array.from(v).sort();
+  const first = Object.values(years).flat().sort()[0];
+  await update('meta', (m) => ({ ...m, history: { months, years, scannedAt: Date.now(), from: first ? `${first}-01-01` : m.history?.from } }));
+  await detail(run, `history: ${Object.entries(years).filter(([, y]) => y.length).map(([k, y]) => `${k} ${y[0]}–${y[y.length - 1]}`).join(', ') || 'none before the daily window'} · ${rows.toLocaleString()} product-months`);
+  return rows;
+}
+
+/** Merch's own totals for a few ranges, next to Loupe's, so you can see the numbers match. */
+async function verifyTotals(run: Run) {
+  const today = zonedDay(Date.now());
+  const y = Number(today.slice(0, 4));
+  const ranges = [
+    { key: 'all', label: 'All time', from: `${FIRST_YEAR}-01-01`, to: today },
+    { key: 'year', label: 'This year', from: `${y}-01-01`, to: today },
+    { key: 'lastYear', label: 'Last year', from: `${y - 1}-01-01`, to: `${y - 1}-12-31` },
+    { key: '30d', label: 'Last 30 days', from: addDays(today, -29), to: today },
+    { key: 'yesterday', label: 'Yesterday', from: addDays(today, -1), to: addDays(today, -1) },
+    { key: 'today', label: 'Today', from: today, to: today },
+  ];
+  const mids = MARKETPLACE_IDS.map((m) => `marketplaceId=${MARKETPLACES[m].mid}`).join('&');
+  const done = await exec(run, ranges.map((r) => probeWire(`${MERCH}/api/reporting/purchases/summary?${mids}&fromDate=${pacific(r.from)}&toDate=${pacific(r.to, true)}`)), { concurrency: 6, timeoutMs: 20_000 });
+  const rows = await getAll('sales');
+  const out: NonNullable<Meta['verify']>['ranges'] = [];
+  done.forEach((d, i) => {
+    const payload = d.capture?.payload as Record<string, { unitsSold?: unknown }> | undefined;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return;
+    let merch = 0;
+    let seen = false;
+    for (const v of Object.values(payload)) {
+      if (v && typeof v === 'object' && typeof v.unitsSold === 'number') {
+        merch += v.unitsSold;
+        seen = true;
+      }
+    }
+    if (!seen) return;
+    const r = ranges[i]!;
+    let loupe = 0;
+    for (const row of rows) loupe += row.units * share(row, r.from, r.to);
+    out.push({ ...r, merch, loupe: Math.round(loupe) });
+  });
+  if (!out.length) return;
+  await update('meta', (m) => ({ ...m, verify: { at: Date.now(), zone: reportZone(), ranges: out } }));
+  await detail(run, `Merch's totals: ${out.map((r) => `${r.label.toLowerCase()} ${r.merch.toLocaleString()}${r.loupe === r.merch ? ' ✓' : ` (Loupe ${r.loupe.toLocaleString()})`}`).join(' · ')}`);
 }
 
 // ---------- catalog ----------
@@ -790,6 +921,7 @@ export async function startSync(
 ): Promise<Record<string, unknown>> {
   if (active) return { running: true };
   const settings = await getSettings();
+  setReportZone((await get('meta')).reportZone);
   const restarts = opts.restarts ?? 0;
   let tabId = preferTab;
   const ownTab = preferTab !== undefined && opts.ownTab === true;
@@ -933,6 +1065,7 @@ async function execute(run: Run) {
     // Only a sales request that has returned sales is worth a full backfill.
     if (isStrongSales(have.sales)) salesRows = await downloadSales(run, have.sales!);
     if (have.catalog && run.mode !== 'quick') catalogItems = (await downloadCatalog(run, have.catalog)).items;
+    if (isStrongSales(have.sales)) await verifyTotals(run).catch((e: Error) => detail(run, `couldn't compare with Merch's totals: ${e.message}`));
 
     const salesOk = isStrongSales(have.sales) || salesRows > 0;
     const catalogOk = run.mode === 'quick' || isStrongCatalog(have.catalog);

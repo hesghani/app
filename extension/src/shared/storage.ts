@@ -17,6 +17,12 @@ export interface Meta {
   migratedToDb?: boolean;
   /** Marketplaces Loupe has sales for; a marketplace's first import never notifies. */
   knownMarkets?: string[];
+  /** The time zone Merch's own pages use for days (detected); US Pacific if unknown. */
+  reportZone?: string;
+  /** Older history, kept as monthly totals: which marketplace-months are stored, and which years had sales. */
+  history?: { months: Record<string, number>; years: Record<string, number[]>; scannedAt?: number; from?: string };
+  /** Merch's own totals next to Loupe's, from the last sync. */
+  verify?: { at: number; zone: string; ranges: Array<{ key: string; label: string; from: string; to: string; merch: number; loupe: number }> };
 }
 
 interface Schema {

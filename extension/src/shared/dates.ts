@@ -2,6 +2,7 @@
 // language, plus small helpers for local calendar dates (YYYY-MM-DD).
 
 import { fold } from './text';
+import { zonedDay } from './zoned';
 
 const MONTHS: Record<string, number> = {};
 const NAMES: Array<[number, string[]]> = [
@@ -52,12 +53,9 @@ export function localDay(time: number | Date = Date.now()): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-/** Calendar date in Amazon's reporting time zone (US Pacific). */
+/** Calendar date in the zone Merch reports days in (US Pacific unless Merch uses another for this account). */
 export function pacificDay(time: number): string {
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(new Date(time));
-  return parts;
+  return zonedDay(time);
 }
 
 export function addDays(day: string, n: number): string {

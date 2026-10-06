@@ -21,15 +21,35 @@ export interface Filter {
   asin?: string;
 }
 
+/** Last day a row covers: its date, or the end of a multi-day total. */
+export function rowEnd(r: SaleRow): string {
+  return r.until ?? r.date;
+}
+
+/** Share of a row that falls in [from, to]: 0 or 1 for a daily row, by days for a multi-day total. */
+export function share(r: SaleRow, from: string, to: string): number {
+  const end = r.until ?? r.date;
+  if (end < from || r.date > to) return 0;
+  if (!r.until) return 1;
+  const a = r.date > from ? r.date : from;
+  const b = end < to ? end : to;
+  return (daysBetween(a, b) + 1) / (daysBetween(r.date, end) + 1);
+}
+
+function scaled(r: SaleRow, k: number): SaleRow {
+  return k === 1 ? r : { ...r, units: r.units * k, cancelled: r.cancelled * k, returned: r.returned * k, royalty: r.royalty * k };
+}
+
 export function filterRows(rows: SaleRow[], f: Filter): SaleRow[] {
-  return rows.filter(
-    (r) =>
-      r.date >= f.range.from &&
-      r.date <= f.range.to &&
-      (!f.marketplaces?.length || f.marketplaces.includes(r.marketplace)) &&
-      (!f.productTypes?.length || (r.productType !== null && f.productTypes.includes(r.productType))) &&
-      (!f.asin || r.asin === f.asin),
-  );
+  const out: SaleRow[] = [];
+  for (const r of rows) {
+    if (f.marketplaces?.length && !f.marketplaces.includes(r.marketplace)) continue;
+    if (f.productTypes?.length && (r.productType === null || !f.productTypes.includes(r.productType))) continue;
+    if (f.asin && r.asin !== f.asin) continue;
+    const k = share(r, f.range.from, f.range.to);
+    if (k > 0) out.push(scaled(r, k));
+  }
+  return out;
 }
 
 export interface Totals {
@@ -68,6 +88,17 @@ export function dailySeries(rows: SaleRow[], range: DayRange, currency: Currency
     points.set(date, { date, units: 0, royalty: 0 });
   }
   for (const r of rows) {
+    if (r.until) {
+      // A multi-day total is spread evenly over its days.
+      const span = daysBetween(r.date, r.until) + 1;
+      for (let d = r.date; d <= r.until; d = addDays(d, 1)) {
+        const p = points.get(d);
+        if (!p) continue;
+        p.units += r.units / span;
+        p.royalty += convert(r.royalty, r.currency, currency, fx) / span;
+      }
+      continue;
+    }
     const p = points.get(r.date);
     if (!p) continue;
     p.units += r.units;
@@ -158,14 +189,15 @@ export function productSummaries(
     if (!s.productType && r.productType) s.productType = r.productType;
     if (r.units > 0) {
       if (!s.firstSale || r.date < s.firstSale) s.firstSale = r.date;
-      if (!s.lastSale || r.date > s.lastSale) s.lastSale = r.date;
-      if (r.date >= recentFrom && r.date <= today) s.velocity += r.units / 30;
+      if (!s.lastSale || rowEnd(r) > s.lastSale) s.lastSale = rowEnd(r);
+      s.velocity += (r.units * share(r, recentFrom, today)) / 30;
     }
-    if (r.date >= range.from && r.date <= range.to) {
-      s.units += r.units;
-      s.royalty += convert(r.royalty, r.currency, currency, fx);
-      s.cancelled += r.cancelled;
-      s.returned += r.returned;
+    const k = share(r, range.from, range.to);
+    if (k > 0) {
+      s.units += r.units * k;
+      s.royalty += convert(r.royalty, r.currency, currency, fx) * k;
+      s.cancelled += r.cancelled * k;
+      s.returned += r.returned * k;
     }
   }
   for (const s of map.values()) s.daysSinceSale = s.lastSale ? daysBetween(s.lastSale, today) : null;

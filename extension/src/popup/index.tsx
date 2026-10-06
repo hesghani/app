@@ -2,6 +2,7 @@ import { render } from 'preact';
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { filterRows, totals } from '../shared/analytics';
 import { addDays, pacificDay, resolveRange } from '../shared/dates';
+import { setReportZone } from '../shared/zoned';
 import { salesBetween } from '../shared/db';
 import * as fmt from '../shared/format';
 import type { Message } from '../shared/messages';
@@ -29,6 +30,7 @@ function Popup() {
 
   useEffect(() => {
     const load = async () => {
+      setReportZone((await get('meta')).reportZone);
       const today = pacificDay(Date.now());
       const [s, rows, m, sync] = await Promise.all([getSettings(), salesBetween(addDays(today, -40), today), get('meta'), get('syncState')]);
       setSettings(s);

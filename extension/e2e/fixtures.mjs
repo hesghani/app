@@ -131,6 +131,7 @@ const MIDS = { US: 'ATVPDKIKX0DER', DE: 'A1PA6795UKMFR9', UK: 'A1F83G8C2ARO7P' }
 
 export function createMerch(style = 'A') {
   const today = zonedDay(Date.now());
+  const ageScale = style === 'D' ? 3 : 1;
   const designs = [
     ...['Retro Pickleball Legend', 'Pickleball Dad Energy', 'Dink Responsibly Pickleball', 'Pickleball Queen Leopard'].map((n, i) => ({ name: n, profile: 'winner', age: 500, types: i === 0 ? ['STANDARD_TSHIRT', 'HOODIE'] : ['STANDARD_TSHIRT'], mps: i === 0 ? ['US', 'DE'] : ['US'] })),
     ...['Cat Nap Club', 'Plant Mom Era', 'Coffee Then Chaos'].map((n) => ({ name: n, profile: 'steady', age: 480, types: ['STANDARD_TSHIRT'], mps: ['US'] })),
@@ -146,7 +147,7 @@ export function createMerch(style = 'A') {
   designs.forEach((d, di) => {
     for (const type of d.types) {
       const listings = d.mps.map((mp) => ({ mp, asin: `B0E2E${String(n++).padStart(5, '0')}` }));
-      products.push({ id: `prod-${di}-${type}`, designId: `design-${di}`, title: `${d.name} ${typeLabel[type]}`, type, profile: d.profile, created: addDays(today, -d.age), status: d.status ?? 'LIVE', listings });
+      products.push({ id: `prod-${di}-${type}`, designId: `design-${di}`, title: `${d.name} ${typeLabel[type]}`, type, profile: d.profile, created: addDays(today, -d.age * ageScale), status: d.status ?? 'LIVE', listings });
     }
   });
   const listings = products.flatMap((p) => p.listings.map((l) => ({ ...l, product: p })));
@@ -221,6 +222,7 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
   const D = {
     dashboard: () => shell('Dashboard', '<h1>Dashboard</h1><div id="out">Loading…</div><div id="limits"></div>', `
       fetch('/api/ratelimiter/metadata', { headers: { 'X-CSRF-Token': TOKEN } }).then((r) => r.json()).then((j) => { document.getElementById('limits').textContent = j.overallDesign.count + ' / ' + j.overallDesign.limit; });
+      fetch('/api/reporting/purchases/summary?marketplaceId=ATVPDKIKX0DER&marketplaceId=A1PA6795UKMFR9&fromDate=' + window.WEEK_FROM + '&toDate=' + window.WEEK_TO, { headers: { 'X-CSRF-Token': TOKEN } });
       ${findListings(10)}.then((j) => { document.getElementById('out').textContent = j.results.length + ' recent of ' + j.hitCount; });`),
     designs: () => shell('Designs', '<h1>Designs</h1><div id="out">Loading…</div>', `
       ${findListings(25)}.then((j) => { document.getElementById('out').textContent = j.results.length + ' of ' + j.hitCount; });`),
@@ -278,7 +280,7 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
       A: ['/api/account/summary', '/api/reporting/purchases/records', '/api/products/search'],
       B: ['/api/account/summary', '/api/sales/report', '/api/manage/listings'],
       C: ['/v1/dashboard/recent-products', '/v1/analytics/sales', '/v1/catalog/listings'],
-      D: ['/api/ratelimiter/metadata', FIND, '/api/reporting/purchases/report', '/api/reporting/purchases/records', '/api/reporting/earnings/report'],
+      D: ['/api/ratelimiter/metadata', FIND, '/api/reporting/purchases/report', '/api/reporting/purchases/records', '/api/reporting/earnings/report', '/api/reporting/purchases/summary'],
     }[style];
     if (!owned.includes(path)) return { status: 404, json: { message: 'Not found' } };
     if (path === '/api/account/summary') return { json: { account: { tier: 1000, dailyPublishLimit: 100, publishedToday: 4 } } };
@@ -360,6 +362,18 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
         })),
       };
     }
+    if (path === '/api/reporting/purchases/summary') {
+      const from = zonedDay(Number(url.searchParams.get('fromDate')));
+      const to = zonedDay(Number(url.searchParams.get('toDate')));
+      const out = {};
+      for (const mid of url.searchParams.getAll('marketplaceId')) {
+        const mp = Object.keys(MIDS).find((k) => MIDS[k] === mid);
+        const units = mp ? salesFor(mp, from, to).reduce((n, s) => n + s.u, 0) : 0;
+        const code = mp === 'DE' ? 'EUR' : mp === 'UK' ? 'GBP' : 'USD';
+        out[mid] = { unitsSold: units, unitsCancelled: 0, unitsReturned: 0, revenue: { code, value: units * 19.99 }, revenueExclTax: { code, value: units * 16.5 }, royalties: { code, value: mp ? royalty(mp, units).value : 0 } };
+      }
+      return { json: out };
+    }
     if (path === '/api/reporting/earnings/report') {
       // Lists ASINs with titles and types for the range, but it's not the product list.
       return { json: listings.filter((l) => l.mp === 'US').map((l) => ({ asin: l.asin, productTitle: l.product.title, productType: l.product.type, marketplaceId: MIDS.US, payoutStatus: 'PENDING' })) };
@@ -423,6 +437,7 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
       const to = zonedMidnight(addDays(today, 1)) - 1;
       html = html.replace('<script>', `<script>window.FROM=${from};window.TO=${to};`);
     }
+    if (style === 'D') html = html.replace('<script>', `<script>window.WEEK_FROM=${zonedMidnight(addDays(today, -6))};window.WEEK_TO=${zonedMidnight(addDays(today, 1)) - 1};`);
     return route.fulfill({ contentType: 'text/html', body: html });
   }
 

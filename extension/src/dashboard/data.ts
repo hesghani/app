@@ -6,6 +6,7 @@ import { getAll } from '../shared/db';
 import type { Template } from '../shared/learn';
 import { withDefaults, type Settings } from '../shared/settings';
 import type { Meta } from '../shared/storage';
+import { setReportZone } from '../shared/zoned';
 import type { AccountFacts, CaptureLogEntry, CatalogItem, ListingDraft, NicheResult, RangeTotal, SaleRow, StoredProduct, SyncDebug, SyncState } from '../shared/types';
 
 export interface Data {
@@ -34,6 +35,7 @@ type DbPart = Pick<Data, 'sales' | 'catalog' | 'totals'>;
 async function loadStorage(): Promise<StoragePart> {
   const all = await chrome.storage.local.get(null);
   const pick = <T>(key: string, fallback: T): T => (all[key] as T | undefined) ?? fallback;
+  setReportZone(pick<Meta>('meta', {}).reportZone);
   return {
     settings: withDefaults(pick<Partial<Settings>>('settings', {})),
     meta: pick<Meta>('meta', {}),

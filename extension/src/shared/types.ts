@@ -40,8 +40,10 @@ export interface StoredProduct extends ProductData {
 }
 
 export interface SaleRow {
-  /** Calendar date of the sale, YYYY-MM-DD. */
+  /** Calendar date of the sale, YYYY-MM-DD (the first day, for a total over several days). */
   date: string;
+  /** For a total over several days (older history is kept per month): the last day it covers. */
+  until?: string;
   marketplace: MarketplaceId;
   asin: string;
   productType: ProductType | null;

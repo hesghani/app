@@ -1,11 +1,48 @@
-// Calendar arithmetic in Amazon's reporting time zone (US Pacific), so that a
-// timestamp meaning "midnight Pacific" stays midnight Pacific when moved by
-// whole days, across daylight-saving changes.
+// Calendar arithmetic in the time zone Merch reports days in, so that a
+// timestamp meaning "midnight" stays midnight when moved by whole days,
+// across daylight-saving changes. US Pacific by default; Loupe switches to
+// the zone Merch's own pages use for "today" when it sees one (some accounts
+// get local time).
 
-const TZ = 'America/Los_Angeles';
-const fmt = new Intl.DateTimeFormat('en-US', {
-  timeZone: TZ, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
-});
+export const DEFAULT_ZONE = 'America/Los_Angeles';
+
+const formatter = (tz: string) =>
+  new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+
+let zone = DEFAULT_ZONE;
+let fmt = formatter(zone);
+
+/** Sets the zone days are counted in. Unknown zones are ignored. */
+export function setReportZone(tz: string | null | undefined) {
+  const next = tz || DEFAULT_ZONE;
+  if (next === zone) return;
+  try {
+    fmt = formatter(next);
+    zone = next;
+  } catch {
+    /* unknown zone */
+  }
+}
+
+export function reportZone(): string {
+  return zone;
+}
+
+/** The zone, among `candidates`, in which `ms` is exactly midnight. */
+export function zoneOfMidnight(ms: number, candidates: string[]): string | null {
+  for (const tz of candidates) {
+    try {
+      const p: Record<string, number> = {};
+      for (const { type, value } of formatter(tz).formatToParts(new Date(ms))) if (type !== 'literal') p[type] = Number(value);
+      if (p.hour === 0 && p.minute === 0 && p.second === 0 && ms % 1000 === 0) return tz;
+    } catch {
+      /* unknown zone */
+    }
+  }
+  return null;
+}
 
 function parts(ms: number) {
   const p: Record<string, number> = {};

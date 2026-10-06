@@ -12,6 +12,7 @@ export type Message =
   | { type: 'capture:log'; entry: CaptureLogEntry }
   | { type: 'sync:start'; mode: SyncMode; interactive: boolean }
   | { type: 'sync:stop' }
+  | { type: 'zone:detected'; zone: string }
   | { type: 'listing:fill'; draft: ListingDraft; overwrite: boolean }
   | { type: 'watchlist:refresh'; keys?: string[] }
   | { type: 'settings:changed' }

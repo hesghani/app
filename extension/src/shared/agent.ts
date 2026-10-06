@@ -7,7 +7,7 @@
 // says which numbers triggered it.
 
 import { addDays, daysBetween } from './dates';
-import { convert, type FxRates } from './analytics';
+import { convert, rowEnd, share, type FxRates } from './analytics';
 import { MARKETPLACES, MARKETPLACE_IDS, type Currency, type MarketplaceId } from './marketplaces';
 import { PRODUCT_TYPES, type ProductType } from './products';
 import { DEFAULT_ROYALTY_MODEL, type RoyaltyModel, type RoyaltyTier } from './royalty';
@@ -224,19 +224,23 @@ export function analyzePortfolio(input: AgentInput): Portfolio {
     if (!stat.productType && row.productType) stat.productType = row.productType;
     const royalty = convert(row.royalty, row.currency, currency, fx);
     if (row.units > 0) {
-      if (!stat.lastSale || row.date > stat.lastSale) stat.lastSale = row.date;
+      if (!stat.lastSale || rowEnd(row) > stat.lastSale) stat.lastSale = rowEnd(row);
       if (!stat.firstSale || row.date < stat.firstSale) stat.firstSale = row.date;
     }
-    if (row.date >= d30) { stat.u30 += row.units; stat.r30 += royalty; }
-    if (row.date >= d90) { stat.u90 += row.units; stat.r90 += royalty; }
-    if (row.date >= d90 && row.date < d30) stat.prev60 += row.units;
-    if (row.date >= d365) {
-      stat.u365 += row.units;
-      stat.r365 += royalty;
-      stat.returns365 += row.returned;
-      stat.cancels365 += row.cancelled;
+    // Older history comes as monthly totals: count the share of each that falls in a window.
+    const k30 = share(row, d30, today);
+    const k90 = share(row, d90, today);
+    const k365 = share(row, d365, today);
+    stat.u30 += row.units * k30; stat.r30 += royalty * k30;
+    stat.u90 += row.units * k90; stat.r90 += royalty * k90;
+    stat.prev60 += row.units * share(row, d90, addDays(d30, -1));
+    if (k365 > 0) {
+      stat.u365 += row.units * k365;
+      stat.r365 += royalty * k365;
+      stat.returns365 += row.returned * k365;
+      stat.cancels365 += row.cancelled * k365;
       const months = monthsOf.get(key) ?? new Array<number>(12).fill(0);
-      months[Number(row.date.slice(5, 7)) - 1]! += row.units;
+      months[Number(row.date.slice(5, 7)) - 1]! += row.units * k365;
       monthsOf.set(key, months);
     }
   }
@@ -424,7 +428,7 @@ function seasons(designs: Design[], input: AgentInput): Portfolio['seasons'] {
       lastYearUnits = 0;
       const keys = new Set(matching.flatMap((d) => d.products.map((p) => p.key)));
       for (const row of input.sales) {
-        if (row.date >= lastFrom && row.date <= lastTo && keys.has(`${row.marketplace}:${row.asin}`)) lastYearUnits += row.units;
+        if (keys.has(`${row.marketplace}:${row.asin}`)) lastYearUnits += row.units * share(row, lastFrom, lastTo);
       }
     }
     return { ...u, designs: matching.length, lastYearUnits };
