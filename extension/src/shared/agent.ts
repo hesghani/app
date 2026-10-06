@@ -12,6 +12,7 @@ import { MARKETPLACES, MARKETPLACE_IDS, type Currency, type MarketplaceId } from
 import { PRODUCT_TYPES, type ProductType } from './products';
 import { DEFAULT_ROYALTY_MODEL, type RoyaltyModel, type RoyaltyTier } from './royalty';
 import { SEASONS, upcomingSeasons, type UpcomingSeason } from './seasons';
+import { eventDates, previousOccurrence, type EventKind } from './events';
 import { fold } from './text';
 import type { CatalogItem, RangeTotal, SaleRow } from './types';
 
@@ -25,6 +26,8 @@ export interface AgentInput {
   today: string;
   /** First day of complete daily sales history, if known. */
   coverageFrom: string | null;
+  /** First day of any sales history (older months are kept as monthly totals). */
+  historyFrom?: string | null;
   currency: Currency;
   fx: FxRates;
   designLimit: number | null;
@@ -126,12 +129,57 @@ export interface Portfolio {
   marketMix: Array<{ marketplace: MarketplaceId; units90: number; royalty90: number; listings: number }>;
   niches: Niche[];
   seasons: Array<UpcomingSeason & { designs: number; lastYearUnits: number | null }>;
+  /** Events coming up (school, awareness, sports, holidays, trends…), best opportunities first. */
+  plan: PlanItem[];
+  /** Niches that sell all year. */
+  evergreens: Evergreen[];
   recommendations: Recommendation[];
+}
+
+export interface PlanItem {
+  id: string;
+  name: string;
+  kind: EventKind;
+  start: string;
+  end: string;
+  sellFrom: string;
+  uploadBy: string;
+  daysUntil: number;
+  /** now: the upload window is open; selling: shoppers are buying; soon/later: plan it. */
+  stage: 'now' | 'selling' | 'soon' | 'later' | 'trend';
+  size: 1 | 2 | 3;
+  designs: number;
+  examples: string[];
+  /** Units your matching designs sold around the same event last year (null if history doesn't reach). */
+  lastYear: number | null;
+  who: string;
+  ideas: string[];
+  types: ProductType[];
+  caution?: string;
+  /** How many new designs are worth making. */
+  make: number;
+  advice: string;
+  score: number;
+}
+
+export interface Evergreen {
+  name: string;
+  designs: number;
+  units365: number;
+  perMonth: number;
+  /** Months of the last 12 with sales. */
+  months: number;
+  /** Share of the year's units in the best month (low = steady). */
+  peakShare: number;
+  examples: string[];
+  /** Product types its best designs sell on, and types none of its designs have. */
+  missingTypes: ProductType[];
+  advice: string;
 }
 
 // ---------- titles, designs, niches ----------
 
-const TYPE_WORDS = /\b(?:premium|standard|t[\s-]?shirts?|tees?|shirts?|tshirts?|pullover|zip(?:per)?|hoodies?|hoody|sweatshirts?|long[\s-]?sleeves?|raglans?|v[\s-]?necks?|tank[\s-]?tops?|tanks?|popsockets?|popgrips?|grips?|phone[\s-]?cases?|cases?|tote[\s-]?bags?|totes?|throw[\s-]?pillows?|pillows?)\b/g;
+const TYPE_WORDS = /\b(?:premium|standard|t[\s-]?shirts?|tees?|shirts?|tshirts?|pullover|zip(?:per)?|hoodies?|hoody|sweatshirts?|long[\s-]?sleeves?|raglans?|v[\s-]?necks?|tank[\s-]?tops?|tanks?|popsockets?|popgrips?|grips?|phone[\s-]?cases?|cases?|tote[\s-]?bags?|totes?|throw[\s-]?pillows?|pillows?|trucker hats?|baseball (?:hats?|caps?)|hats?|caps?|mugs?|jackets?)\b/g;
 
 export function designTitleKey(title: string): string {
   return fold(title).replace(TYPE_WORDS, ' ').replace(/\s+/g, ' ').trim();
@@ -163,7 +211,7 @@ function nicheTerms(title: string): string[] {
 
 // ---------- building the portfolio ----------
 
-const APPAREL: ProductType[] = ['STANDARD_TSHIRT', 'PREMIUM_TSHIRT', 'HOODIE', 'SWEATSHIRT', 'LONG_SLEEVE', 'VNECK', 'RAGLAN', 'TANK', 'ZIP_HOODIE'];
+const APPAREL: ProductType[] = ['STANDARD_TSHIRT', 'PREMIUM_TSHIRT', 'HOODIE', 'SWEATSHIRT', 'LONG_SLEEVE', 'VNECK', 'RAGLAN', 'TANK', 'ZIP_HOODIE', 'VALUE_TSHIRT', 'PERFORMANCE_TSHIRT', 'PERFORMANCE_HOODIE'];
 
 function emptyStat(key: string): ProductStat {
   return {
@@ -329,8 +377,12 @@ export function analyzePortfolio(input: AgentInput): Portfolio {
     marketMix: marketMix(products),
     niches: niches(liveDesigns),
     seasons: seasons(liveDesigns, input),
+    plan: [],
+    evergreens: [],
     recommendations: [],
   };
+  portfolio.plan = plan(liveDesigns, input);
+  portfolio.evergreens = evergreens(liveDesigns, portfolio.niches);
   portfolio.recommendations = recommend(portfolio, input);
   return portfolio;
 }
@@ -435,6 +487,97 @@ function seasons(designs: Design[], input: AgentInput): Portfolio['seasons'] {
   });
 }
 
+// ---------- event planner ----------
+
+function plan(designs: Design[], input: AgentInput): PlanItem[] {
+  const { today } = input;
+  const known = [input.historyFrom, input.coverageFrom].filter((d): d is string => Boolean(d)).sort()[0];
+  const earliest = known ?? input.sales.reduce((min, r) => (r.date < min ? r.date : min), today);
+  const items: PlanItem[] = [];
+  for (const e of eventDates(today, 150)) {
+    const ev = e.event;
+    const matching = designs.filter((d) => ev.match.test(` ${fold(d.title)} `));
+    let lastYear: number | null = null;
+    const prev = previousOccurrence(e);
+    if (prev && earliest <= prev.from && ev.kind !== 'trend') {
+      const keys = new Set(matching.flatMap((d) => d.products.map((p) => p.key)));
+      lastYear = 0;
+      for (const row of input.sales) if (keys.has(`${row.marketplace}:${row.asin}`)) lastYear += row.units * share(row, prev.from, prev.to);
+      lastYear = Math.round(lastYear);
+    }
+    const stage: PlanItem['stage'] = ev.kind === 'trend' ? 'trend' : today >= e.sellFrom ? 'selling' : today >= addDays(e.uploadBy, -21) ? 'now' : e.daysUntil - ev.lead <= 45 ? 'soon' : 'later';
+    // Small events first: fewer sellers flood them, and buyers (schools, teams) order in groups.
+    const sizeW = ev.size === 3 ? 0.55 : ev.size === 2 ? 1 : 1.25;
+    // Shoppers buying for an event still a week or more away: design for it today.
+    const urgency = stage === 'selling' ? (e.daysUntil >= 7 ? 3.2 : 1.5) : { now: 3, soon: 1.4, later: 0.6, trend: 1.2 }[stage];
+    const proximity = e.daysUntil <= 30 ? 1.25 : e.daysUntil <= 60 ? 1 : 0.8;
+    const gap = matching.length === 0 ? 1.4 : matching.length < 5 ? 1.15 : 0.85;
+    const proof = lastYear ? 1 + Math.log10(1 + lastYear) / 2 : 1;
+    const by = e.uploadBy < today ? `as soon as you can (shoppers start ${short(e.sellFrom)})` : `by ${short(e.uploadBy)}`;
+    const make = Math.max(0, (ev.size === 1 ? 5 : ev.size === 2 ? 8 : 12) - Math.floor(matching.length / 2));
+    const types = ev.types ?? ['STANDARD_TSHIRT', 'LONG_SLEEVE', 'HOODIE'];
+    const typeNames = types.slice(0, 3).map((t) => PRODUCT_TYPES[t].short.toLowerCase()).join(', ');
+    let advice: string;
+    if (stage === 'trend') {
+      advice = matching.length
+        ? `You have ${matching.length} designs on it. Watch their sales weekly and stop when they fade.`
+        : `Test 3–5 designs now, on ${typeNames}. Keep the ones that sell within 3 weeks.`;
+    } else if (stage === 'selling') {
+      advice = matching.length
+        ? `Shoppers are buying now. Your ${matching.length} designs are in place${lastYear ? ` (they sold ${lastYear} last year)` : ''}: add the best ones to more product types today.`
+        : `Shoppers are buying now and you have nothing for it. Listings go live in a day or two, so a few quick designs can still sell.`;
+    } else if (stage === 'now') {
+      advice = matching.length
+        ? `Upload window open: have ${make || 'a few'} more live ${by}.${lastYear ? ` Last year your ${matching.length} designs sold ${lastYear} units around it.` : ''}`
+        : `Upload window open: get ${make} designs live ${by}. You have none yet.`;
+    } else {
+      advice = `Plan it: upload between ${short(addDays(e.uploadBy, -21))} and ${short(e.uploadBy)}.${matching.length ? ` You already have ${matching.length}.` : ''}`;
+    }
+    items.push({
+      id: ev.id, name: ev.name, kind: ev.kind, start: e.start, end: e.end, sellFrom: e.sellFrom, uploadBy: e.uploadBy, daysUntil: e.daysUntil,
+      stage, size: ev.size, designs: matching.length, examples: [...matching].sort((a, b) => b.u365 - a.u365).slice(0, 3).map((d) => d.title),
+      // Idea phrases carry the event's own year ("Red Ribbon Week 2026").
+      lastYear, who: ev.who, ideas: ev.ideas.map((i) => i.replace(/\b20\d\d\b/g, e.start.slice(0, 4))), types, caution: ev.caution, make, advice,
+      score: urgency * proximity * sizeW * gap * proof,
+    });
+  }
+  return items.sort((a, b) => b.score - a.score);
+}
+
+function short(day: string): string {
+  return new Date(`${day}T12:00:00Z`).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+}
+
+function evergreens(designs: Design[], niches: Niche[]): Evergreen[] {
+  const out: Evergreen[] = [];
+  for (const n of niches) {
+    const group = designs.filter((d) => d.niches.includes(n.name));
+    const months = new Array<number>(12).fill(0);
+    for (const d of group) d.months.forEach((u, i) => (months[i]! += u));
+    const total = months.reduce((s, u) => s + u, 0);
+    if (total < 12) continue;
+    const active = months.filter((u) => u >= 0.5).length;
+    const peakShare = Math.max(...months) / total;
+    if (active < 9 || peakShare > 0.25) continue;
+    const sellers = group.filter((d) => d.u365 > 0).sort((a, b) => b.u365 - a.u365);
+    const have = new Set(group.flatMap((d) => d.types));
+    const missingTypes = APPAREL.filter((t) => !have.has(t)).slice(0, 3);
+    const perDesign = total / group.length;
+    out.push({
+      name: n.name,
+      designs: group.length,
+      units365: Math.round(total),
+      perMonth: total / 12,
+      months: active,
+      peakShare,
+      examples: sellers.slice(0, 3).map((d) => d.title),
+      missingTypes,
+      advice: `Sells in ${active} of 12 months (${Math.round(total / 12)} a month, ${perDesign.toFixed(1)} per design a year). Make ${perDesign >= 3 ? '10' : '5'} more around your best sellers${missingTypes.length ? ` and add ${missingTypes.map((t) => PRODUCT_TYPES[t].short.toLowerCase()).join(', ')}` : ''}.`,
+    });
+  }
+  return out.sort((a, b) => b.units365 - a.units365).slice(0, 12);
+}
+
 // ---------- recommendations ----------
 
 function percentile(values: number[], p: number): number {
@@ -447,7 +590,8 @@ function recommend(p: Portfolio, input: AgentInput): Recommendation[] {
   const recs: Recommendation[] = [];
   const live = p.designs.filter((d) => d.live);
   const money = (n: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: input.currency, maximumFractionDigits: input.currency === 'JPY' ? 0 : 0 }).format(n);
-  const historyDays = input.coverageFrom ? daysBetween(input.coverageFrom, input.today) + 1 : 0;
+  const historyStart = [input.historyFrom, input.coverageFrom].filter((d): d is string => Boolean(d)).sort()[0];
+  const historyDays = historyStart ? daysBetween(historyStart, input.today) + 1 : 0;
   // How many days of sales Loupe can vouch for: daily history or product totals.
   const knownDays = Math.min(365, Math.max(historyDays, ...input.totals.map((t) => t.days), 0));
   const nearLimit = p.designLimit ? p.liveDesigns >= p.designLimit * 0.9 : false;
@@ -574,7 +718,8 @@ function recommend(p: Portfolio, input: AgentInput): Recommendation[] {
     recs.push({
       id: `season-${s.season.id}-${s.date}`,
       kind: 'season',
-      priority: days <= 60 ? 1 : 2,
+      // Big holidays: the planner leads with smaller events; these are reminders for proven sellers.
+      priority: days <= 30 && matching.length > 0 ? 2 : 3,
       title: `${s.season.name} is in ${days} days: ${matching.length ? `you have ${matching.length} designs for it` : 'you have no designs for it yet'}`,
       why: open
         ? `Shoppers are buying now (from ${s.sellingFrom}). New designs uploaded today still have time to get indexed.`

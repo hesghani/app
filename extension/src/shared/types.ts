@@ -116,6 +116,8 @@ export interface CatalogItem {
   /** When the listing was created or published, YYYY-MM-DD. */
   createdAt: string | null;
   image: string | null;
+  /** Merch says shoppers can find it on Amazon (searchableOnRetail). */
+  searchable?: boolean | null;
   seenAt: number;
 }
 

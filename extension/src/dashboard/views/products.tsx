@@ -1,56 +1,85 @@
+// Products: every listing on Merch (one per product type and marketplace),
+// with its status, when it was created, what it sold, and a picture.
+
 import { useMemo, useState } from 'preact/hooks';
-import type { Design } from '../../shared/agent';
-import { addDays, pacificDay } from '../../shared/dates';
-import { dailySeries, filterRows } from '../../shared/analytics';
 import { toCsv } from '../../shared/csv';
 import * as fmt from '../../shared/format';
 import { MARKETPLACES, productUrl } from '../../shared/marketplaces';
-import { PRODUCT_TYPES } from '../../shared/products';
-import { ColumnChart } from '../../ui/charts';
-import { Card, Empty, Notice, Seg } from '../../ui/components';
-import { Arrow, Box, Download, External, Search } from '../../ui/icons';
+import { PRODUCT_TYPES, type ProductType } from '../../shared/products';
+import { Card, Empty, Seg } from '../../ui/components';
+import { Arrow, Download, External, Shirt } from '../../ui/icons';
 import type { Data } from '../data';
-import { usePortfolio } from './agent';
-import { PageHead } from './common';
+import { PageHead, usePersistent } from './common';
 import { download } from './download';
+import {
+  createdMatches, FilterBar, NO_FILTERS, PERIOD_LABEL, Preview, soldMatches, STATUS_LABEL, STATUS_TONE, useInventory,
+  type Filters, type ListingRow, type Period, type Status,
+} from './inventory';
 
-type SortKey = 'u30' | 'u90' | 'u365' | 'r90' | 'lastSale' | 'ageDays';
-type Show = 'live' | 'sold' | 'never' | 'all';
+type SortKey = 'title' | 'created' | 'sold' | 'price' | 'lastSale' | 'status';
+const PAGE = 100;
 
 export function Products({ data }: { data: Data }) {
-  const p = usePortfolio(data);
-  const currency = data.settings.displayCurrency;
-  const [query, setQuery] = useState('');
-  const [show, setShow] = useState<Show>('live');
-  const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: 'u90', desc: true });
-  const [open, setOpen] = useState<string | null>(null);
-  const [limit, setLimit] = useState(300);
+  const { listings, designs, today } = useInventory(data);
+  const [f, setF] = usePersistent<Filters>('products-filters', NO_FILTERS);
+  const [period, setPeriod] = usePersistent<Period>('products-period', 'all');
+  const [sort, setSort] = usePersistent<{ key: SortKey; desc: boolean }>('products-sort', { key: 'sold', desc: true });
+  const [page, setPage] = useState(0);
+  const designOf = useMemo(() => new Map(designs.map((d) => [d.key, d])), [designs]);
 
   const rows = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    let list = p.designs.filter((d) => !q || d.title.toLowerCase().includes(q) || d.products.some((x) => x.asin?.toLowerCase().includes(q)));
-    if (show === 'live') list = list.filter((d) => d.live);
-    if (show === 'sold') list = list.filter((d) => d.u365 > 0);
-    if (show === 'never') list = list.filter((d) => d.live && d.u365 === 0);
-    const value = (d: Design) => {
-      const v = d[sort.key];
-      return typeof v === 'string' ? Date.parse(v) : (v ?? -1);
+    const q = f.q.trim().toLowerCase();
+    const list = listings.filter(
+      (l) =>
+        (!q || l.title.toLowerCase().includes(q) || l.brand.toLowerCase().includes(q) || (l.asin ?? '').toLowerCase().includes(q)) &&
+        (f.mp === 'ALL' || l.marketplace === f.mp) &&
+        (f.type === 'ALL' || l.productType === f.type) &&
+        (f.status === 'ALL' || l.status === f.status) &&
+        (f.searchable === 'any' || (f.searchable === 'yes' ? l.searchable === true : l.searchable === false)) &&
+        createdMatches(l.createdAt, f, today) &&
+        soldMatches(l.sold, f),
+    );
+    const value = (l: ListingRow): number | string => {
+      switch (sort.key) {
+        case 'title': return l.title.toLowerCase();
+        case 'created': return l.createdAt ?? '';
+        case 'price': return l.price ?? -1;
+        case 'lastSale': return l.lastSale ?? '';
+        case 'status': return STATUS_LABEL[l.status];
+        default: return l.sold[period];
+      }
     };
-    return [...list].sort((a, b) => (sort.desc ? value(b) - value(a) : value(a) - value(b)));
-  }, [p, query, show, sort]);
+    return list.sort((a, b) => {
+      const x = value(a);
+      const y = value(b);
+      const c = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y));
+      return sort.desc ? -c : c;
+    });
+  }, [listings, f, sort, period, today]);
 
-  if (!p.designs.length) {
+  const types = useMemo(() => Array.from(new Set(listings.map((l) => l.productType).filter((t): t is ProductType => t !== null))), [listings]);
+  const counts = useMemo(() => {
+    const c: Partial<Record<Status, number>> = {};
+    for (const l of listings) c[l.status] = (c[l.status] ?? 0) + 1;
+    return c;
+  }, [listings]);
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE));
+  const current = Math.min(page, pages - 1);
+  const shown = rows.slice(current * PAGE, (current + 1) * PAGE);
+  const soldInView = rows.reduce((n, l) => n + l.sold[period], 0);
+
+  if (!listings.length) {
     return (
       <div class="stack">
-        <PageHead title="Designs" />
-        <Card><Empty icon={<Box size={22} />} title="No designs yet"><p>Connect your Merch account and your designs appear here, including the ones that never sold.</p></Empty></Card>
+        <PageHead title="Products" />
+        <Card><Empty icon={<Shirt size={22} />} title="No products yet"><p>Sync your Merch account and every listing appears here with its status, sales and picture.</p></Empty></Card>
       </div>
     );
   }
 
-  const header = (key: SortKey, text: string) => (
-    <th class="num" aria-sort={sort.key === key ? (sort.desc ? 'descending' : 'ascending') : 'none'}>
-      <button onClick={() => setSort({ key, desc: sort.key === key ? !sort.desc : true })}>
+  const head = (key: SortKey, text: string, num = false) => (
+    <th class={num ? 'num' : ''} aria-sort={sort.key === key ? (sort.desc ? 'descending' : 'ascending') : 'none'}>
+      <button onClick={() => { setSort({ key, desc: sort.key === key ? !sort.desc : key !== 'title' }); setPage(0); }}>
         {text}
         {sort.key === key && <Arrow dir={sort.desc ? 'down' : 'up'} size={11} />}
       </button>
@@ -59,13 +88,13 @@ export function Products({ data }: { data: Data }) {
 
   return (
     <div class="stack">
-      <PageHead title="Designs" sub={`${fmt.int(p.liveDesigns)} live designs${p.catalogKnown ? ` · ${fmt.int(p.liveProducts)} live products` : ''} · grouped across product types and marketplaces`}>
+      <PageHead title="Products" sub={`${fmt.int(counts.live ?? 0)} live of ${fmt.int(listings.length)} listings · one per product type and marketplace`}>
         <button
           class="btn sm"
           onClick={() =>
-            download('loupe-designs.csv', toCsv([
-              ['Design', 'Brand', 'Live', 'Product types', 'Marketplaces', 'Units 30d', 'Units 90d', 'Units 365d', `Royalties 90d ${currency}`, `Royalties 365d ${currency}`, 'Returns 365d', 'Last sale', 'Created', 'ASINs'],
-              ...rows.map((d) => [d.title, d.brand, d.live ? 'yes' : 'no', d.types.map((t) => PRODUCT_TYPES[t].short).join(' '), d.marketplaces.join(' '), d.u30, d.u90, d.u365, d.r90.toFixed(2), d.r365.toFixed(2), d.returns365, d.lastSale ?? '', d.createdAt ?? '', d.products.map((x) => x.asin).filter(Boolean).join(' ')]),
+            download('loupe-products.csv', toCsv([
+              ['Title', 'Brand', 'Marketplace', 'Product type', 'Status', 'Merch status', 'Created', 'ASIN', 'Price', 'Searchable', 'Sold all time', 'Sold 365d', 'Sold 90d', 'Sold 30d', 'Last sale'],
+              ...rows.map((l) => [l.title, l.brand, l.marketplace ?? '', l.productType ? PRODUCT_TYPES[l.productType].label : '', STATUS_LABEL[l.status], l.rawStatus, l.createdAt ?? '', l.asin ?? '', l.price ?? '', l.searchable === null ? '' : l.searchable ? 'yes' : 'no', Math.round(l.sold.all), Math.round(l.sold.y365), Math.round(l.sold.d90), Math.round(l.sold.d30), l.lastSale ?? '']),
             ]))
           }
         >
@@ -73,96 +102,72 @@ export function Products({ data }: { data: Data }) {
         </button>
       </PageHead>
 
-      {!p.catalogKnown && <Notice kind="warn">Only designs with sales are listed until Loupe reads your product list on Merch. Use Sync now on the Agent page.</Notice>}
+      <FilterBar f={f} set={(next) => { setF(next); setPage(0); }} types={types} counts={counts} total={rows.length} noun="products" />
 
-      <div class="filters">
-        <Seg<Show> label="Show" value={show} onChange={setShow} options={[['live', 'Live'], ['sold', 'Sold this year'], ['never', 'No sales this year'], ['all', 'All']]} />
-        <div class="row">
-          <Search size={14} class="muted" />
-          <input class="input" style={{ width: '240px' }} placeholder="Search title or ASIN" value={query} onInput={(e) => setQuery((e.target as HTMLInputElement).value)} aria-label="Search designs" />
-        </div>
-        <span class="muted small">{fmt.int(rows.length)} designs</span>
+      <div class="row wrap">
+        <Seg<Period> label="Sold over" value={period} onChange={setPeriod} options={(Object.keys(PERIOD_LABEL) as Period[]).map((p) => [p, PERIOD_LABEL[p]])} />
+        <span class="muted small">{fmt.int(soldInView)} units sold by these products · {PERIOD_LABEL[period].toLowerCase()}</span>
       </div>
 
       <Card pad={false}>
         <div class="table-wrap">
-          <table class="table">
+          <table class="table inventory">
             <thead>
               <tr>
-                <th>Design</th>
-                <th>Products</th>
-                {header('u30', '30d')}
-                {header('u90', '90d')}
-                {header('u365', '365d')}
-                {header('r90', 'Royalties 90d')}
-                {header('lastSale', 'Last sale')}
-                {header('ageDays', 'Age')}
+                <th aria-label="Picture" />
+                {head('title', 'Product')}
+                <th>Market</th>
+                <th>Type</th>
+                {head('status', 'Status')}
+                {head('created', 'Created', true)}
+                <th>ASIN</th>
+                {head('price', 'Price', true)}
+                {head('sold', `Sold · ${PERIOD_LABEL[period]}`, true)}
+                {head('lastSale', 'Last sale', true)}
               </tr>
             </thead>
             <tbody>
-              {rows.slice(0, limit).map((d) => {
-                const first = d.products.find((x) => x.asin && x.marketplace);
-                return (
-                  <>
-                    <tr class={open === d.key ? 'expanded' : ''} onClick={() => setOpen(open === d.key ? null : d.key)} style={{ cursor: 'pointer' }}>
-                      <td>
-                        <div class="title-cell">
-                          <span class="t" title={d.title}>{d.title || first?.asin}</span>
-                          {!d.live && <span class="pill neutral">not live</span>}
-                        </div>
-                      </td>
-                      <td class="small ink2 nowrap">{d.types.map((t) => PRODUCT_TYPES[t].short).join(', ') || '–'} {d.marketplaces.map((m) => MARKETPLACES[m].flag).join('')}</td>
-                      <td class="num">{fmt.int(d.u30)}</td>
-                      <td class="num">{fmt.int(d.u90)}</td>
-                      <td class="num">{d.u365 ? fmt.int(d.u365) : <span class="pill warn">0</span>}</td>
-                      <td class="num">{fmt.money(d.r90, currency)}</td>
-                      <td class="num muted">{fmt.day(d.lastSale)}</td>
-                      <td class="num muted">{fmt.age(d.ageDays)}</td>
-                    </tr>
-                    {open === d.key && (
-                      <tr class="expanded">
-                        <td colSpan={8}><DesignDetail design={d} data={data} /></td>
-                      </tr>
-                    )}
-                  </>
-                );
-              })}
+              {shown.map((l) => (
+                <tr>
+                  <td><Preview listing={l} fallback={designOf.get(l.designKey)?.preview} /></td>
+                  <td>
+                    <div class="title-cell stack" style={{ gap: '2px' }}>
+                      <span class="t" title={l.title}>{l.title || '—'}</span>
+                      {l.brand && <span class="muted small">{l.brand}</span>}
+                    </div>
+                  </td>
+                  <td class="nowrap">{l.marketplace ? `${MARKETPLACES[l.marketplace].flag} ${l.marketplace}` : '—'}</td>
+                  <td class="small nowrap">{l.productType ? PRODUCT_TYPES[l.productType].label : '—'}</td>
+                  <td><span class={`pill ${STATUS_TONE[l.status]}`} title={l.rawStatus}>{STATUS_LABEL[l.status]}</span>{l.searchable === false && l.status === 'live' && <span class="pill warn" title="Merch says shoppers can't find it on Amazon">not searchable</span>}</td>
+                  <td class="num muted nowrap">{fmt.day(l.createdAt)}</td>
+                  <td class="nowrap small">
+                    {l.asin && l.marketplace ? (
+                      <a href={productUrl(l.marketplace, l.asin)} target="_blank" rel="noopener">{l.asin} <External size={11} /></a>
+                    ) : <span class="muted">—</span>}
+                  </td>
+                  <td class="num">{l.price !== null && l.marketplace ? fmt.money(l.price, MARKETPLACES[l.marketplace].currency) : '—'}</td>
+                  <td class="num">{l.sold[period] ? <b>{fmt.int(l.sold[period])}</b> : <span class="muted">0</span>}</td>
+                  <td class="num muted nowrap">{fmt.day(l.lastSale)}</td>
+                </tr>
+              ))}
             </tbody>
           </table>
         </div>
-        {rows.length > limit && (
-          <div class="card-foot row">
-            <span class="muted small grow">Showing {fmt.int(limit)} of {fmt.int(rows.length)}.</span>
-            <button class="btn sm" onClick={() => setLimit(limit + 300)}>Show more</button>
-          </div>
-        )}
+        {pages > 1 && <Pager page={current} pages={pages} total={rows.length} size={PAGE} onPage={setPage} />}
       </Card>
     </div>
   );
 }
 
-function DesignDetail({ design, data }: { design: Design; data: Data }) {
-  const today = pacificDay(Date.now());
-  const range = { from: addDays(today, -89), to: today };
-  const keys = new Set(design.products.map((p) => p.key));
-  const rows = filterRows(data.sales, { range }).filter((r) => keys.has(`${r.marketplace}:${r.asin}`));
-  const series = dailySeries(rows, range, data.settings.displayCurrency, data.settings.fx);
+export function Pager({ page, pages, total, size, onPage }: { page: number; pages: number; total: number; size: number; onPage: (p: number) => void }) {
   return (
-    <div class="stack" style={{ padding: '6px 0' }}>
-      <div class="chips">
-        {design.products.map((p) => (
-          <span class="chip" title={p.status}>
-            {p.marketplace ? MARKETPLACES[p.marketplace].flag : ''} {p.productType ? PRODUCT_TYPES[p.productType].short : 'Product'} · {fmt.int(p.u90)} in 90d
-            {p.asin && p.marketplace && <a href={productUrl(p.marketplace, p.asin)} target="_blank" rel="noopener" onClick={(e) => e.stopPropagation()}><External size={11} /></a>}
-          </span>
-        ))}
-      </div>
-      <ColumnChart
-        height={150}
-        ariaLabel={`Daily units for ${design.title}, last 90 days`}
-        data={series.map((d) => ({ key: d.date, label: fmt.day(d.date), value: d.units, detail: `${fmt.day(d.date)} · ${fmt.money(d.royalty, data.settings.displayCurrency)}` }))}
-        format={(n) => fmt.compact(n)}
-      />
+    <div class="card-foot row">
+      <span class="muted small grow">{fmt.int(page * size + 1)}–{fmt.int(Math.min(total, (page + 1) * size))} of {fmt.int(total)}</span>
+      <button class="btn sm" disabled={page === 0} onClick={() => onPage(0)}>First</button>
+      <button class="btn sm" disabled={page === 0} onClick={() => onPage(page - 1)}>Previous</button>
+      <span class="small">Page {page + 1} of {pages}</span>
+      <button class="btn sm" disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>Next</button>
+      <button class="btn sm" disabled={page >= pages - 1} onClick={() => onPage(pages - 1)}>Last</button>
     </div>
   );
 }

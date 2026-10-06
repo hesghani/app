@@ -220,6 +220,14 @@ table.table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .table tbody tr:hover td { background: var(--surface-2); }
 .table tr.expanded td { background: var(--surface-2); }
 .thumb { width: 36px; height: 36px; border-radius: 6px; object-fit: contain; background: #fff; border: 1px solid var(--line); flex: none; }
+.preview { display: block; border-radius: 8px; object-fit: contain; background: #fff; border: 1px solid var(--line); flex: none; }
+.preview.empty { display: inline-flex; align-items: center; justify-content: center; font-size: 10px; color: var(--muted); background: var(--surface-2); text-align: center; line-height: 1.1; padding: 2px; }
+.table.inventory td { vertical-align: middle; }
+.table.inventory .title-cell .t { max-width: 360px; }
+.inventory-filters { flex-wrap: wrap; }
+.inventory-filters input[type="date"] { width: 140px; }
+.design-products { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+.design-product { display: flex; gap: 8px; align-items: center; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 .title-cell { display: flex; align-items: center; gap: 10px; min-width: 220px; max-width: 460px; }
 .title-cell .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; }
 
@@ -336,3 +344,8 @@ body.popup { width: 380px; background: var(--bg); }
 .rec.done { opacity: 0.6; }
 .rec h2 { font-size: 15.5px; }
 .connect .progress { height: 6px; }
+
+/* Agent planner */
+.plan-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.plan-card h3 { font-size: 16px; }
+.warn-text { color: var(--warn-ink); }

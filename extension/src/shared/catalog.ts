@@ -15,6 +15,7 @@ const KEYS = {
   asin: ['asin', 'childasin', 'productasin', 'listingasin'],
   id: ['id', 'productid', 'listingid', 'merchproductid', 'gearproductid', 'uuid', 'externalid'],
   listingId: ['listingid', 'merchlistingid'],
+  searchable: ['searchableonretail', 'searchable', 'discoverable', 'isdiscoverable', 'issearchable'],
   designId: ['designid', 'artworkid', 'imageid', 'designuuid', 'groupid', 'parentid'],
   title: ['title', 'producttitle', 'designtitle', 'listingtitle', 'itemname', 'name', 'productname', 'designname'],
   brand: ['brand', 'brandname'],
@@ -75,6 +76,7 @@ interface Ctx {
   image?: string;
   id?: string;
   listingId?: string;
+  searchable?: boolean;
   marketplace?: MarketplaceId;
 }
 
@@ -98,6 +100,8 @@ function own(obj: Obj): Ctx {
   if (id) ctx.id = id;
   const listingId = str(pick(obj, 'listingId'));
   if (listingId) ctx.listingId = listingId;
+  const searchable = pick(obj, 'searchable');
+  if (typeof searchable === 'boolean') ctx.searchable = searchable;
   const mp = marketplaceFromAny(pick(obj, 'marketplace'));
   if (mp) ctx.marketplace = mp;
   return ctx;
@@ -138,6 +142,7 @@ export function normalizeCatalog(payload: unknown, now = Date.now()): CatalogIte
       price,
       createdAt: c.createdAt ?? null,
       image: c.image ?? null,
+      searchable: c.searchable ?? null,
       seenAt: now,
     });
   };

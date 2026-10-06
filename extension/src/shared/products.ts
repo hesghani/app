@@ -4,8 +4,9 @@
 import type { MarketplaceId } from './marketplaces';
 
 export type ProductType =
-  | 'STANDARD_TSHIRT' | 'PREMIUM_TSHIRT' | 'VNECK' | 'TANK' | 'LONG_SLEEVE' | 'RAGLAN'
-  | 'SWEATSHIRT' | 'HOODIE' | 'ZIP_HOODIE' | 'POPSOCKET' | 'PHONE_CASE' | 'TOTE' | 'PILLOW';
+  | 'STANDARD_TSHIRT' | 'PREMIUM_TSHIRT' | 'VALUE_TSHIRT' | 'PERFORMANCE_TSHIRT' | 'VNECK' | 'TANK' | 'LONG_SLEEVE' | 'RAGLAN'
+  | 'SWEATSHIRT' | 'HOODIE' | 'ZIP_HOODIE' | 'PERFORMANCE_HOODIE' | 'JACKET' | 'TRUCKER_HAT' | 'BASEBALL_HAT'
+  | 'POPSOCKET' | 'PHONE_CASE' | 'TOTE' | 'PILLOW' | 'MUG';
 
 export interface ProductTypeInfo {
   label: string;
@@ -23,6 +24,8 @@ export interface ProductTypeInfo {
 export const PRODUCT_TYPES: Record<ProductType, ProductTypeInfo> = {
   STANDARD_TSHIRT: { label: 'Standard T-Shirt', short: 'Tee', price: 19.99, cost: 12.11 },
   PREMIUM_TSHIRT: { label: 'Premium T-Shirt', short: 'Premium', price: 21.99, cost: 13.49 },
+  VALUE_TSHIRT: { label: 'Value T-Shirt', short: 'Value Tee', price: 16.99, cost: 10.6 },
+  PERFORMANCE_TSHIRT: { label: 'Performance T-Shirt', short: 'Perf. Tee', price: 24.99, cost: 15.4 },
   VNECK: { label: 'V-Neck T-Shirt', short: 'V-Neck', price: 19.99, cost: 12.4 },
   TANK: { label: 'Tank Top', short: 'Tank', price: 19.99, cost: 12.4 },
   LONG_SLEEVE: { label: 'Long Sleeve T-Shirt', short: 'Long Sleeve', price: 24.99, cost: 15.64 },
@@ -30,10 +33,15 @@ export const PRODUCT_TYPES: Record<ProductType, ProductTypeInfo> = {
   SWEATSHIRT: { label: 'Sweatshirt', short: 'Sweatshirt', price: 31.99, cost: 18.99 },
   HOODIE: { label: 'Pullover Hoodie', short: 'Hoodie', price: 34.99, cost: 21.34 },
   ZIP_HOODIE: { label: 'Zip Hoodie', short: 'Zip Hoodie', price: 36.99, cost: 22.41 },
+  PERFORMANCE_HOODIE: { label: 'Performance Hoodie', short: 'Perf. Hoodie', price: 44.99, cost: 27.9 },
+  JACKET: { label: 'Softshell Jacket', short: 'Jacket', price: 59.99, cost: 38.5 },
+  TRUCKER_HAT: { label: 'Trucker Hat', short: 'Trucker', price: 19.99, cost: 12.6 },
+  BASEBALL_HAT: { label: 'Baseball Hat', short: 'Cap', price: 19.99, cost: 12.6 },
   POPSOCKET: { label: 'PopSockets Grip', short: 'PopSockets', price: 14.99, cost: 9.04 },
   PHONE_CASE: { label: 'Phone Case', short: 'Case', price: 19.99, cost: 11.99 },
   TOTE: { label: 'Tote Bag', short: 'Tote', price: 19.99, cost: 12.59 },
   PILLOW: { label: 'Throw Pillow', short: 'Pillow', price: 24.99, cost: 15.84 },
+  MUG: { label: 'Mug', short: 'Mug', price: 14.99, cost: 8.9 },
 };
 
 export const PRODUCT_TYPE_IDS = Object.keys(PRODUCT_TYPES) as ProductType[];
@@ -73,13 +81,36 @@ export function detectProductType(...texts: Array<string | null | undefined>): P
   return null;
 }
 
-/** Turns free text from Merch reports ("Standard t-shirt", "HOODIE_PULLOVER") into a product type. */
+// Merch's product type names ("STANDARD_PULLOVER_HOODIE", "PRINTED_TRUCKER_HAT"…)
+// and report labels ("Standard t-shirt"). Order matters: "STANDARD_SWEATSHIRT"
+// is a sweatshirt, not a standard T-shirt.
+const LABELS: Array<[RegExp, ProductType]> = [
+  [/ZIP/, 'ZIP_HOODIE'],
+  [/PERFORMANCE.*HOOD/, 'PERFORMANCE_HOODIE'],
+  [/HOOD|PULLOVER/, 'HOODIE'],
+  [/SWEAT/, 'SWEATSHIRT'],
+  [/JACKET|SOFTSHELL/, 'JACKET'],
+  [/TRUCKER/, 'TRUCKER_HAT'],
+  [/BASEBALL|_CAP\b|^CAP\b|\bHAT\b/, 'BASEBALL_HAT'],
+  [/RAGLAN/, 'RAGLAN'],
+  [/LONG.?SLEEVE/, 'LONG_SLEEVE'],
+  [/V.?NECK/, 'VNECK'],
+  [/TANK/, 'TANK'],
+  [/POP.?(?:SOCKET|GRIP)/, 'POPSOCKET'],
+  [/CASE/, 'PHONE_CASE'],
+  [/TOTE/, 'TOTE'],
+  [/PILLOW/, 'PILLOW'],
+  [/MUG/, 'MUG'],
+  [/VALUE/, 'VALUE_TSHIRT'],
+  [/PERFORMANCE/, 'PERFORMANCE_TSHIRT'],
+  [/PREMIUM/, 'PREMIUM_TSHIRT'],
+  [/T.?SHIRT|\bTEE\b|STANDARD/, 'STANDARD_TSHIRT'],
+];
+
+/** Turns Merch's product type names and report labels into a product type. */
 export function productTypeFromLabel(label: string | null | undefined): ProductType | null {
   if (!label) return null;
-  const normalized = label.replace(/_/g, ' ');
-  if (/^standard/i.test(normalized)) return 'STANDARD_TSHIRT';
-  if (/^premium/i.test(normalized) && /shirt|tee/i.test(normalized)) return 'PREMIUM_TSHIRT';
-  if (/zip/i.test(normalized)) return 'ZIP_HOODIE';
-  if (/pullover|hood/i.test(normalized)) return 'HOODIE';
-  return detectProductType(normalized);
+  const upper = label.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+  for (const [re, type] of LABELS) if (re.test(upper.replace(/_/g, ' ')) || re.test(upper)) return type;
+  return detectProductType(label);
 }

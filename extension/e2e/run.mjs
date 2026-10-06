@@ -54,7 +54,7 @@ async function launch(style) {
       `--load-extension=${dist}`,
       // Nothing may reach the real Amazon: anything the stand-in sites don't
       // intercept fails instead (on CI it would otherwise hit a real sign-in page).
-      '--host-resolver-rules=MAP *.amazon.com 127.0.0.1, MAP amazon.com 127.0.0.1',
+      '--host-resolver-rules=MAP *.amazon.com 127.0.0.1, MAP amazon.com 127.0.0.1, MAP *.ssl-images-amazon.com 127.0.0.1, MAP *.media-amazon.com 127.0.0.1',
     ],
   });
   const merch = createMerch(style);
@@ -79,6 +79,12 @@ async function launch(style) {
     return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ suggestions }) });
   });
   await context.route(/https:\/\/merch\.amazon\.com\/.*/, (route) => merch.handle(route));
+  // Product pictures by ASIN: a colored tile per ASIN.
+  await context.route(/https:\/\/images-(?:na|eu|fe)\.ssl-images-amazon\.com\/images\/P\/.*/, (route) => {
+    const asin = route.request().url().match(/\/P\/([A-Z0-9]{10})/)?.[1] ?? '';
+    const hue = [...asin].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 0);
+    return route.fulfill({ contentType: 'image/svg+xml', body: `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300"><rect width="300" height="300" fill="#f4f4f6"/><path d="M90 60l-60 40 25 50 30-15v125h130V135l30 15 25-50-60-40c-8 18-30 30-60 30s-52-12-60-30z" fill="hsl(${hue},55%,55%)"/><text x="150" y="200" font-size="22" text-anchor="middle" font-family="Arial" fill="#fff">${asin.slice(-4)}</text></svg>` });
+  });
   await context.route((url) => url.href.startsWith(`${API_HOST}/`), (route) => merch.handleApi(route));
   const worker = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker'));
   const extensionId = new URL(worker.url()).host;
@@ -241,7 +247,7 @@ console.log('Scenario A: research overlays, connect (GET + epoch dates, POST + t
       assert.match(text, /Put your \d+ best sellers on more products/);
       assert.match(text, /of 1,000 used/);
       await dash.screenshot({ path: join(out, 'agent.png'), fullPage: true });
-      await dash.goto(ext('dashboard.html#products'));
+      await dash.goto(ext('dashboard.html#designs'));
       await dash.waitForSelector('text=Fishing Lure Pattern 1 T-Shirt');
       await dash.screenshot({ path: join(out, 'designs.png') });
     });
@@ -470,6 +476,43 @@ console.log("Scenario D: Merch's real API (FindListings search-after paging, ran
       for (const r of meta.verify.ranges) assert.equal(r.loupe, r.merch, `${r.label}: Loupe ${r.loupe} vs Merch ${r.merch}`);
       console.log(`    matches Merch: ${meta.verify.ranges.map((r) => `${r.label} ${r.merch}`).join(' · ')}`);
       assert.equal(meta.reportZone, 'America/Los_Angeles', 'day boundaries taken from Merch’s own requests');
+    });
+
+    dash.on('pageerror', (e) => console.log(`    page error: ${e.message}`));
+    await step('Products lists every listing with filters and pictures; Designs groups them', async () => {
+      await dash.goto(ext('dashboard.html#products'));
+      await dash.waitForSelector('text=listings · one per product type and marketplace');
+      const sub = await dash.evaluate(() => document.querySelector('main.main')?.textContent ?? '');
+      assert.match(sub, new RegExp(`of ${merch.listings.length} listings`));
+      await dash.selectOption('select[aria-label="Status"]', 'processing');
+      await dash.waitForFunction(() => document.querySelectorAll('table.inventory tbody tr').length === 2);
+      await dash.selectOption('select[aria-label="Status"]', 'ALL');
+      await dash.selectOption('select[aria-label="Marketplace"]', 'DE');
+      await dash.waitForFunction(() => [...document.querySelectorAll('table.inventory tbody tr')].every((tr) => tr.textContent.includes('DE')));
+      await dash.selectOption('select[aria-label="Marketplace"]', 'ALL');
+      await dash.selectOption('select[aria-label="Sales"]', 'never');
+      const never = await dash.locator('table.inventory tbody tr').count();
+      assert.ok(never >= 12, `never-sold listings: ${never}`);
+      await dash.click('text=Clear filters');
+      await dash.waitForFunction(() => [...document.querySelectorAll('img.preview')].some((i) => i.complete && i.naturalWidth > 1));
+      await dash.screenshot({ path: join(out, 'products.png') });
+      await dash.goto(ext('dashboard.html#designs'));
+      await dash.waitForSelector('text=live designs of');
+      await dash.locator('table.inventory tbody tr').first().click();
+      await dash.waitForSelector('.design-products .design-product');
+      await dash.screenshot({ path: join(out, 'designs-real.png') });
+    });
+
+    await step('the agent plans events and evergreens', async () => {
+      await dash.goto(ext('dashboard.html#agent'));
+      await dash.waitForSelector('text=Upload plan: events worth designing for');
+      const cards = await dash.locator('.plan-card').count();
+      assert.ok(cards > 0, 'event cards');
+      const text = await dash.locator('main').textContent();
+      assert.match(text, /Trends to test/);
+      assert.match(text, /Evergreens/);
+      await dash.screenshot({ path: join(out, 'agent-plan.png'), fullPage: true });
+      await dash.locator('.plan-grid').screenshot({ path: join(out, 'plan-cards.png') });
     });
 
     await step('the next full sync is incremental and still matches Merch', async () => {

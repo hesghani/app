@@ -228,7 +228,8 @@ label{display:grid;gap:4px;font-weight:bold;font-size:13px}input,textarea{font:i
       ${findListings(25)}.then((j) => { document.getElementById('out').textContent = j.results.length + ' of ' + j.hitCount; });`),
   };
   // Listing states as Merch reports them; a listing that's still publishing has no ASIN yet.
-  const dStatus = (l, i) => (l.product.status !== 'LIVE' ? l.product.status : i === 3 ? 'PUBLISHING' : i === 5 ? 'PROPAGATED' : 'LIVE');
+  // Two of the newest (never sold) designs are still publishing / propagating.
+  const dStatus = (l, i) => (l.product.status !== 'LIVE' ? l.product.status : i === listings.length - 2 ? 'PUBLISHING' : i === listings.length - 3 ? 'PROPAGATED' : 'LIVE');
   const dListings = listings.map((l, i) => ({ ...l, status: dStatus(l, i), listingId: `${l.product.designId}-${l.product.type}-${l.mp}`.padEnd(48, '0').slice(0, 48), updated: Date.now() - i * 3600_000 }));
 
   const pages = style === 'C' ? {

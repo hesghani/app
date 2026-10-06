@@ -13,9 +13,10 @@ stays in your browser.
 
 | Area | Features |
 | --- | --- |
-| **Account sync** | One click on **Connect Merch account**: working in a background Merch tab with your signed-in session, Loupe finds where Merch serves your sales and products and downloads up to 400 days of daily sales across all marketplaces and every product in your catalog, usually in about a minute. After that it syncs on its own every 30 minutes, with new-sale notifications and today's units on the toolbar icon. |
-| **Portfolio agent** | Groups your products into designs and niches and ranks actions: designs to **replace** (no sales in a year, with slot math against your tier), best sellers to **put on more product types** and **marketplaces**, designs **taking off** or **slowing down**, **niches to double down on or stop**, **upcoming seasons** with upload deadlines and last year's numbers, high **return rates**, and **price tests**. Every action lists its designs with ASINs and CSV export. |
-| **Designs** | Your whole catalog grouped by design, including designs that never sold, with 30/90/365-day units, royalties, last sale and age. |
+| **Account sync** | One click on **Connect Merch account**: working in a background Merch tab with your signed-in session, Loupe finds where Merch serves your sales and products and downloads your whole sales history (daily for the last 90 days, monthly per product back to your first sale) across all marketplaces, and every listing with its status. After that it syncs on its own every 30 minutes, with no gaps, new-sale notifications and today's units on the toolbar icon. Days are counted in the time zone Merch's own pages use, and every sync checks Loupe's totals against Merch's own (all time, this year, last year, yesterday, today). |
+| **Portfolio agent** | An **upload plan** built on a calendar of about 120 events, weighted toward the smaller ones that fewer sellers upload for: school days (Dot Day, Unity Day, Red Ribbon Week, 100th Day, Read Across America, testing season, field day), awareness months, profession weeks (teachers, nurses, paras, bus drivers, counselors, lab, rad and vet techs…), sports seasons (game day, Pink Out, volleyball, wrestling), heritage months, fun days and current trends ("6 7", "in my ___ era"). For each: when shoppers start, the day to be live by, who buys, your matching designs and what they sold last year, idea prompts that open demand research, and trademark cautions. Plus **evergreen** niches that sell every month, and ranked actions: designs to **replace**, best sellers to **put on more product types** and **marketplaces**, designs **taking off** or **slowing down**, **niches to double down on or stop**, **return rates** and **price tests**. |
+| **Products** | Every listing Merch reports, with its picture, status (live, processing, in review, rejected, draft, removed), marketplace, product type, created date, ASIN, price and units sold (all time, 365/90/30 days). Filter by marketplace, product type, status, created date, sales and whether shoppers can find it; sort any column; export CSV. |
+| **Designs** | The same listings grouped by design, with a picture, where each design is live, its statuses, created date, units and royalties; open a design to see each product and its last 90 days. |
 | **Amazon search** | Toolbar with a **niche score**, median BSR, number of results under 100k BSR, average estimated sales, median age, Merch share and result count. A badge on every result shows its BSR, estimated monthly sales, age, Merch detection, sub-category rank and review count. Sort by best BSR, newest or reviews; filter to Merch only, hide ads, cap the BSR; export CSV; copy ASINs; one-click **Merch filter** that limits the search to Merch shirts. |
 | **Amazon product page** | Floating panel: BSR with category ranks, sales estimate, publish date and age, price and reviews, **royalty at this price for all three tiers**, extracted keywords (click to copy), trademark and policy scan with USPTO/TMview links, BSR history, **Track BSR**. |
 | **Sales** | Today, yesterday, 7/30/90 days, month to date, last month, year to date and all time. Units, royalties, royalty per unit and designs sold, each compared with the previous period. Daily, weekly or monthly chart with a table view; breakdowns by marketplace and product type; top designs. Filter by marketplace and product type. Royalties are converted into one currency. |
@@ -35,6 +36,10 @@ Marketplaces: 🇺🇸 US, 🇬🇧 UK, 🇩🇪 DE, 🇫🇷 FR, 🇮🇹 IT, �
 | Connected | Designs | Merch create page |
 | --- | --- | --- |
 | ![](docs/connected.png) | ![](docs/designs.png) | ![](docs/merch-dock.png) |
+
+| Upload plan | Products |
+| --- | --- |
+| ![](docs/plan.png) | ![](docs/products.png) |
 
 ## Install
 

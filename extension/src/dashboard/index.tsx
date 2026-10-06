@@ -2,12 +2,13 @@ import { render, type ComponentChildren } from 'preact';
 import { useEffect } from 'preact/hooks';
 import * as fmt from '../shared/format';
 import { ToastProvider } from '../ui/components';
-import { Box, Chart, Coins, Eye, Logo, Pen, Search, Settings as SettingsIcon, Shield, Wand } from '../ui/icons';
+import { Chart, Coins, Eye, Layers, Logo, Pen, Search, Settings as SettingsIcon, Shield, Shirt, Wand } from '../ui/icons';
 import { Agent } from './views/agent';
 import { useData, useRoute } from './data';
 import { Listings } from './views/listings';
 import { Overview } from './views/overview';
 import { Products } from './views/products';
+import { Designs } from './views/designs';
 import { Research } from './views/research';
 import { Royalties } from './views/royalties';
 import { Settings } from './views/settings';
@@ -18,11 +19,12 @@ import { Welcome } from './views/welcome';
 const NAV: Array<[string, string, ComponentChildren]> = [
   ['agent', 'Agent', <Wand size={17} />],
   ['overview', 'Sales', <Chart size={17} />],
-  ['products', 'Designs', <Box size={17} />],
+  ['products', 'Products', <Shirt size={17} />],
+  ['designs', 'Designs', <Layers size={17} />],
   ['research', 'Research', <Search size={17} />],
   ['watchlist', 'Watchlist', <Eye size={17} />],
   ['trademarks', 'Trademarks', <Shield size={17} />],
-  ['listings', 'Listings', <Pen size={17} />],
+  ['listings', 'Drafts', <Pen size={17} />],
   ['royalties', 'Royalties', <Coins size={17} />],
   ['settings', 'Settings', <SettingsIcon size={17} />],
 ];
@@ -68,6 +70,8 @@ function App() {
           <Overview data={data} />
         ) : page === 'products' ? (
           <Products data={data} />
+        ) : page === 'designs' ? (
+          <Designs data={data} />
         ) : page === 'research' ? (
           <Research data={data} route={route} />
         ) : page === 'watchlist' ? (

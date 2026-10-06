@@ -46,9 +46,12 @@ export function age(days: number | null | undefined): string {
 export function day(iso: string | null | undefined, style: 'short' | 'long' = 'short'): string {
   if (!iso) return '–';
   const d = new Date(`${iso}T12:00:00Z`);
-  return d.toLocaleDateString(LOCALE, style === 'short'
-    ? { month: 'short', day: 'numeric', timeZone: 'UTC' }
-    : { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  // Short dates outside the current year (or the year around it) show the year.
+  const thisYear = new Date().getUTCFullYear();
+  const withYear = style === 'long' || Math.abs(d.getUTCFullYear() - thisYear) >= 1 && Math.abs(Date.now() - d.getTime()) > 300 * 86_400_000;
+  return d.toLocaleDateString(LOCALE, withYear
+    ? { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }
+    : { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
 export function ago(time: number | null | undefined, now = Date.now()): string {

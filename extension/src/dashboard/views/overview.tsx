@@ -170,7 +170,7 @@ export function Overview({ data }: { data: Data }) {
         </Card>
       </div>
 
-      <Card title="Top designs" actions={<button class="btn sm ghost" onClick={() => navigate('products')}>All products</button>} pad={false}>
+      <Card title="Top designs" actions={<button class="btn sm ghost" onClick={() => navigate('designs')}>All designs</button>} pad={false}>
         <div class="table-wrap">
           <table class="table">
             <thead>

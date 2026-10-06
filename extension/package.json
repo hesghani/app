@@ -1,6 +1,6 @@
 {
   "name": "loupe-merch-extension",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "description": "Loupe: research, sales analytics and listing tools for Amazon Merch on Demand (Chrome extension, Manifest V3)",
   "type": "module",

@@ -139,6 +139,23 @@ export const Box = (p: Props) => (
     <path d="M12 13v8" />
   </Svg>
 );
+export const Shirt = (p: Props) => (
+  <Svg {...p}>
+    <path d="M8 3l-5 3 2 4 2-1v12h10V9l2 1 2-4-5-3c-.5 1.5-2 2.5-4 2.5S8.5 4.5 8 3z" />
+  </Svg>
+);
+export const Layers = (p: Props) => (
+  <Svg {...p}>
+    <path d="M12 3l9 5-9 5-9-5z" />
+    <path d="M3 13l9 5 9-5" />
+  </Svg>
+);
+export const Calendar = (p: Props) => (
+  <Svg {...p}>
+    <path d="M4 6h16v14H4z" />
+    <path d="M4 10h16M8 3v4M16 3v4" />
+  </Svg>
+);
 export const Bulb = (p: Props) => (
   <Svg {...p}>
     <path d="M9 18h6M10 21h4" />

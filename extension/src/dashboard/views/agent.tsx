@@ -12,6 +12,7 @@ import { navigate, type Data } from '../data';
 import { ConnectCard, isConnected } from './connect';
 import { PageHead } from './common';
 import { download } from './download';
+import { Planner } from './planner';
 
 export function usePortfolio(data: Data): Portfolio {
   return useMemo(() => {
@@ -22,13 +23,14 @@ export function usePortfolio(data: Data): Portfolio {
       totals: data.totals,
       today: pacificDay(Date.now()),
       coverageFrom: coverageFrom === '9999' ? null : coverageFrom,
+      historyFrom: data.meta.history?.from ?? null,
       currency: data.settings.displayCurrency,
       fx: data.settings.fx,
       designLimit: data.settings.tier ?? data.account?.tier ?? null,
       royalty: data.settings.royalty,
       tier: data.settings.royaltyTier,
     });
-  }, [data.dbVersion, data.settings, data.account, data.meta.coverage?.salesFrom, data.meta.demo]);
+  }, [data.dbVersion, data.settings, data.account, data.meta.coverage?.salesFrom, data.meta.history?.from, data.meta.demo]);
 }
 
 const PRIORITY = { 1: ['Do now', 'bad'], 2: ['This week', 'warn'], 3: ['When you can', 'neutral'] } as const;
@@ -43,7 +45,7 @@ export function Agent({ data }: { data: Data }) {
 
   return (
     <div class="stack">
-      <PageHead title="Agent" sub="Your whole portfolio, analyzed: what to replace, what to scale, and where to upload next" />
+      <PageHead title="Agent" sub="Your whole portfolio, analyzed: what to upload next, what to scale, what to replace" />
       {(!isConnected(data) || data.syncState.status === 'running' || data.syncState.status === 'error' || data.syncState.status === 'signin') && <ConnectCard data={data} />}
       {data.meta.demo && <Notice>You're looking at <b>sample data</b>. Connect your Merch account to analyze your real portfolio.</Notice>}
       {isConnected(data) && data.syncState.status !== 'running' && <ConnectCard data={data} compact />}
@@ -73,6 +75,8 @@ export function Agent({ data }: { data: Data }) {
               Loupe hasn't read your product list yet, so it can't see designs that never sold. Open <b>Manage</b> on Merch once (or click Sync now) to find dead designs.
             </Notice>
           )}
+
+          <Planner portfolio={p} />
 
           <div class="row">
             <h2 class="grow">Next best actions</h2>
